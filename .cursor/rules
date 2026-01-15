@@ -1,0 +1,137 @@
+# ResumeForge — Cursor Project Rules (v2)
+
+These rules are the **single source of truth** for how Cursor should generate code in this repo.
+
+## Non‑negotiables
+
+1. **Evidence-first truthfulness**
+   - No resume claim may appear in any output unless it is traceable to one or more `EvidenceCard.id` values.
+   - Every bullet must carry `evidence_ids: list[str]` internally (even if hidden from the final DOCX).
+   - If the auditor detects an ungrounded claim, the run **fails** (no “best effort” guessing).
+
+2. **Config is the source of truth**
+   - Do not hardcode provider model IDs or API behavior in code.
+   - Load configuration only via `resumeforge/config.py` (or equivalent).
+   - If you need a new setting, add it to `config.yaml` and the Pydantic config schema.
+
+3. **No direct SDK calls outside Providers**
+   - Agents must never call OpenAI/Anthropic/Google/Groq SDKs directly.
+   - Agents call a `ProviderClient` interface (e.g., `generate(...)`) implemented in `resumeforge/providers/*`.
+
+4. **Typed, validated boundaries**
+   - All structured data crossing module boundaries must be a Pydantic v2 model.
+   - Every provider response intended as structured data must be parsed/validated into a Pydantic model.
+
+5. **Testability**
+   - Every agent must be unit-testable with a fake provider (no network).
+   - Orchestrator must have a “golden path” test using fixtures.
+
+## Project layout and imports
+
+**Always use package imports** (never `src.` imports):
+
+- ✅ `from resumeforge.schemas.blackboard import Blackboard`
+- ❌ `from src.schemas.blackboard import Blackboard`
+
+Recommended layout:
+
+```
+resumeforge/
+  src/
+    resumeforge/
+      cli.py
+      config.py
+      orchestrator/
+      agents/
+      providers/
+      schemas/
+      parsers/
+      generators/
+      utils/
+  tests/
+  config.yaml
+  pyproject.toml
+```
+
+## Coding standards
+
+- Keep modules cohesive; split files when a file grows past ~300 lines or mixes responsibilities.
+- Prefer pure functions and small classes; avoid “god objects”.
+- Logging must be structured (`structlog`) and include: `run_id`, `job_id`, `agent`, `provider`, `model`, `attempt`.
+- Handle errors explicitly using typed exceptions (see Error policy below).
+
+### Error policy
+
+Define and use a small set of exceptions:
+
+- `ConfigError` — invalid/missing config
+- `ValidationError` — Pydantic validation failures (wrap/extend if needed)
+- `ProviderError` — provider/network/SDK failures
+- `OrchestrationError` — pipeline coordination failures
+
+Rules:
+- Provider layer converts SDK exceptions → `ProviderError` with context.
+- Orchestrator decides retry/fallback behavior based on config.
+- Agents never swallow errors silently; they return typed results or raise.
+
+## Configuration rules
+
+- `config.yaml` is an example. Local overrides should use `config.local.yaml` (gitignored).
+- Model selection uses **aliases**:
+  - Agents reference `model_alias` (e.g., `writer_default`), not raw model IDs.
+  - Provider resolves alias → provider-specific model string from config.
+
+## Provider interface
+
+All providers implement a consistent interface:
+
+- `generate_text(prompt: str, *, model: str, temperature: float, max_tokens: int, ...) -> str`
+- Optional: `generate_json(schema: type[BaseModel], ...) -> BaseModel` (recommended helper)
+
+Providers must:
+- apply timeouts/retries (prefer `tenacity`)
+- support deterministic mode for auditors (`temperature=0.0`)
+- emit structured logs per attempt
+
+## Agent contracts
+
+Each agent must declare:
+- Inputs: required blackboard keys
+- Outputs: produced keys
+- Side effects: none (except writing to blackboard)
+
+Common agents (per ADR-004, SDD Section 4):
+- `JD Analyst + Strategy` → analyzes job description, determines positioning
+- `EvidenceMapper` → selects relevant evidence cards, maps to requirements
+- `Writer` → creates bullets + sections (internal claim index)
+- `ATS Scorer` → scores keyword coverage, format compatibility
+- `TruthAuditor` → validates claims against evidence, enforces policy
+- `DOCXGenerator` → renders output document from audited content (not an agent, but generator)
+
+## Claim index (required)
+
+Writer must produce `claim_index.json` with:
+
+- `bullet_id`
+- `claim_text`
+- `evidence_ids[]`
+- `metrics[]` (normalized)
+- `timeframe` (if present)
+- `confidence` (0–1)
+- `risk_flags[]` (e.g., `["timeframe_inferred", "metric_rounded"]`)
+
+Auditor must verify:
+- `evidence_ids` not empty
+- every metric/timeframe appears in evidence or is flagged as inferred
+- no PII leakage beyond allowed fields
+
+## Cursor guidance (how to generate code)
+
+When adding new functionality, generate in this order:
+1. Add/extend Pydantic schema(s) in `schemas/`
+2. Add provider interface methods (if needed) in `providers/`
+3. Add agent implementation in `agents/` with explicit contract
+4. Add orchestrator wiring
+5. Add unit tests + a golden test fixture
+
+Do not generate multiple competing implementations. Prefer the simplest design consistent with these rules.

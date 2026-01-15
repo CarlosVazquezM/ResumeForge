@@ -1,0 +1,116 @@
+# ResumeForge Configuration (example)
+# Copy to: config.local.yaml (recommended) and customize per machine/environment.
+
+paths:
+  evidence_cards: ./data/evidence_cards.json
+  templates: ./templates
+  outputs: ./outputs
+  logs_dir: ./logs
+
+pipeline:
+  max_retries: 3
+  request_timeout_seconds: 45
+  max_concurrent_requests: 4
+  retry_backoff_base_ms: 250
+  default_max_pages: 2
+  interactive_mode: false
+
+# Model aliases (agents reference aliases; providers resolve to concrete model IDs)
+# Per ADR-004: Different providers/models per agent for optimal task performance
+models:
+  # Writer - GPT-4o for natural prose (ADR-004, SDD Section 11)
+  writer_default:
+    provider: openai
+    model: gpt-4o
+  
+  # JD Analyst - Claude Sonnet 4 for strong reasoning (ADR-004, SDD Section 11)
+  jd_analyst_default:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  
+  # Evidence Mapper - Claude Sonnet 4 for precision/low hallucination (ADR-004, SDD Section 11)
+  mapper_precise:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  
+  # Truth Auditor - Claude Sonnet 4 for conservative verification (ADR-004, SDD Section 11)
+  auditor_deterministic:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+  
+  # ATS Scorer - Gemini Flash for fast/cheap pattern matching (ADR-004, SDD Section 11)
+  ats_scorer_fast:
+    provider: google
+    model: gemini-1.5-flash
+  
+  # Fallback - Fast alternatives if primary provider fails
+  fallback_fast:
+    provider: groq
+    model: llama-3.1-70b-versatile
+
+agents:
+  # JD Analyst + Strategy Agent (per ADR-004, SDD Section 4.2)
+  jd_analyst:
+    model_alias: jd_analyst_default
+    temperature: 0.3  # Per SDD Section 11
+    max_tokens: 4096  # Per SDD Section 11
+  
+  # Evidence Mapper Agent (per ADR-004, SDD Section 4.3)
+  evidence_mapper:
+    model_alias: mapper_precise
+    temperature: 0.1  # Low for precision (SDD Section 5.4)
+    max_tokens: 4096  # Per SDD Section 11
+  
+  # Resume Writer Agent (per ADR-004, SDD Section 4.4)
+  writer:
+    model_alias: writer_default
+    temperature: 0.4  # Per SDD Section 11
+    max_tokens: 8192  # Per SDD Section 11 (larger for prose generation)
+  
+  # ATS Heuristic Scorer (per ADR-004, SDD Section 4.5)
+  ats_scorer:
+    model_alias: ats_scorer_fast
+    temperature: 0.2  # Per SDD Section 11
+    max_tokens: 2048  # Per SDD Section 11
+  
+  # Truth Auditor Agent (per ADR-004, SDD Section 4.5)
+  truth_auditor:
+    model_alias: auditor_deterministic
+    temperature: 0.0  # Deterministic mode (SDD Section 5.6)
+    max_tokens: 4096  # Per SDD Section 11
+
+providers:
+  openai:
+    timeout_seconds: 45
+    max_retries: 2
+  anthropic:
+    timeout_seconds: 45
+    max_retries: 2
+  google:
+    timeout_seconds: 45
+    max_retries: 2
+  groq:
+    timeout_seconds: 30
+    max_retries: 2
+
+# Provider fallback chain:
+# If a provider fails, the orchestrator tries the next provider in the chain.
+fallback_chain:
+  openai: anthropic
+  anthropic: google
+  google: groq
+  groq: openai
+
+# Optional: override which model alias to use after a provider fallback
+# (If omitted, the orchestrator will keep the same alias and resolve it for the new provider if possible,
+# otherwise it will use `models.fallback_fast`.)
+fallback_model_alias_overrides:
+  anthropic: writer_default  # If OpenAI fails, use Anthropic with writer config
+  google: mapper_precise      # If Anthropic fails, use Google with mapper config
+  groq: fallback_fast         # Fast fallback
+
+logging:
+  level: INFO
+  format: json
+  console: true
+  file: ./logs/resumeforge.log

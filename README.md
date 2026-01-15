@@ -30,14 +30,30 @@ ResumeForge transforms your comprehensive "Fact Resume" into job-targeted resume
    cd ResumeForge
    ```
 
-2. **Install dependencies:**
+2. **Create and activate virtual environment:**
    ```bash
-   pip install -e .
+   # Create virtual environment
+   python3 -m venv .venv
+   
+   # Activate virtual environment
+   # On macOS/Linux:
+   source .venv/bin/activate
+   # On Windows:
+   .venv\Scripts\activate
    ```
 
-   Or for development with testing tools:
+3. **Install dependencies:**
    ```bash
+   # Upgrade pip first
+   pip install --upgrade pip setuptools wheel
+   
+   # Install package in editable mode with dev dependencies
    pip install -e ".[dev]"
+   ```
+   
+   Or for production only (without testing tools):
+   ```bash
+   pip install -e .
    ```
 
 3. **Configure environment:**

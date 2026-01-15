@@ -155,7 +155,7 @@ class EvidenceCard(BaseModel):
                 "scope": {
                     "team_size": 19,
                     "direct_reports": 19,
-                    "geography": ["US", "Romania", "India"],
+                    "geography": ["US", "Romania"],
                     "budget": None
                 },
                 "metrics": [

@@ -60,8 +60,11 @@ LLMs are invoked **only within agent steps**, never for routing decisions.
 
 ### Consequences
 - **Positive:** Predictable execution; easier logging and debugging; faster overall pipeline.
-- **Negative:** Less flexibility for dynamic task decomposition; requires explicit handling of edge cases.
-
+- **Negative:** Less flexibility for dynamic task decomposition; Requires explicit handling of edge cases. Unlike LLM orchestrators that can improvise solutions at runtime, deterministic pipelines must anticipate failure modes in advance. Mitigate by: 
+      (1) implementing a centralized validation layer, 
+      (2) designing for graceful degradation, 
+      (3) providing escape hatches to the user when automated recovery isn't possible, and 
+      (4) comprehensive logging for debugging unexpected states
 ---
 
 ## ADR-003: Evidence Card Data Model
@@ -158,7 +161,9 @@ This provides ~65-70% token reduction for Writer and Auditor steps.
 Accepted
 
 ### Context
-The post-Writer validation step checks two categories: (1) factual accuracy/truthfulness, and (2) ATS optimization suggestions. These have different severity levels.
+The post-Writer validation step checks two categories: 
+(1) factual accuracy/truthfulness, and 
+(2) ATS optimization suggestions. These have different severity levels.
 
 ### Decision
 Implement **separate failure handling**:
@@ -286,6 +291,7 @@ Implement a **terminology normalization step** before Evidence Mapping:
 ### Consequences
 - **Positive:** More accurate matching; fewer false gaps; better keyword optimization.
 - **Negative:** Adds one pipeline step; requires maintenance if domains change.
+
 
 ---
 

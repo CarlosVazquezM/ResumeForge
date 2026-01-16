@@ -73,5 +73,9 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --cov=resumeforge --cov-report=term-missing"
+addopts = "-v --tb=short --cov=resumeforge --cov-report=term-missing -m 'not integration'"
 asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (require real API keys, slower)",
+    "requires_api_key: marks tests that need environment variables for API keys",
+]

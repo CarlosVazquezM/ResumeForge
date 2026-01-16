@@ -1,7 +1,6 @@
 """Base agent interface."""
 
 from abc import ABC, abstractmethod
-from typing import Any
 
 from resumeforge.schemas.blackboard import Blackboard
 

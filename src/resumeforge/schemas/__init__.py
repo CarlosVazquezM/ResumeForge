@@ -6,13 +6,13 @@ from typing import Type
 
 from pydantic import BaseModel
 
-from resumeforge.schemas.evidence_card import EvidenceCard, MetricEntry, ScopeInfo
 from resumeforge.schemas.blackboard import (
-    Blackboard,
     ATSReport,
     AuditReport,
+    Blackboard,
     ClaimMapping,
     Confidence,
+    EvidenceMapping,
     GapResolution,
     GapStrategy,
     Inputs,
@@ -24,8 +24,8 @@ from resumeforge.schemas.blackboard import (
     RoleProfile,
     TruthViolation,
     UserQuestion,
-    EvidenceMapping,
 )
+from resumeforge.schemas.evidence_card import EvidenceCard, MetricEntry, ScopeInfo
 
 __all__ = [
     # Evidence Card models
@@ -56,7 +56,7 @@ __all__ = [
 ]
 
 
-def export_json_schema(model_class: Type[BaseModel], output_path: Path | str) -> None:
+def export_json_schema(model_class: type[BaseModel], output_path: Path | str) -> None:
     """
     Export a Pydantic model's JSON schema to a file.
     

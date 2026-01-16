@@ -6,6 +6,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
+from resumeforge.exceptions import ConfigError
+
 
 class Config(BaseModel):
     """ResumeForge configuration model."""
@@ -25,9 +27,14 @@ def load_config(config_path: str | Path = "./config.yaml") -> Config:
     config_path = Path(config_path)
     
     if not config_path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        raise ConfigError(f"Configuration file not found: {config_path}")
     
-    with open(config_path) as f:
-        data = yaml.safe_load(f)
-    
-    return Config(**data)
+    try:
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+        
+        return Config(**data)
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Invalid YAML in configuration file: {e}") from e
+    except Exception as e:
+        raise ConfigError(f"Error loading configuration: {e}") from e

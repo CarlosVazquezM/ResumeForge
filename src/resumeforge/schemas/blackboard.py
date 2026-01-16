@@ -1,8 +1,8 @@
 """Blackboard state schema definitions."""
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, Literal
 from enum import Enum
+
+from pydantic import BaseModel, Field, field_validator
 
 from resumeforge.schemas.evidence_card import EvidenceCard
 
@@ -77,7 +77,7 @@ class EvidenceMapping(BaseModel):
     requirement_id: str
     evidence_card_ids: list[str]
     confidence: Confidence
-    notes: Optional[str] = None
+    notes: str | None = None
 
 
 class GapResolution(BaseModel):
@@ -181,7 +181,7 @@ class Blackboard(BaseModel):
     synonyms_map: dict[str, list[str]] = Field(default_factory=dict)
     
     # JD Analysis outputs
-    role_profile: Optional[RoleProfile] = None
+    role_profile: RoleProfile | None = None
     requirements: list[Requirement] = Field(default_factory=list)
     
     # Evidence Mapping outputs
@@ -190,13 +190,13 @@ class Blackboard(BaseModel):
     selected_evidence_ids: list[str] = Field(default_factory=list)
     
     # Writer outputs
-    resume_draft: Optional[ResumeDraft] = None
+    resume_draft: ResumeDraft | None = None
     claim_index: list[ClaimMapping] = Field(default_factory=list)
     change_log: list[str] = Field(default_factory=list)
     
     # Audit outputs
-    ats_report: Optional[ATSReport] = None
-    audit_report: Optional[AuditReport] = None
+    ats_report: ATSReport | None = None
+    audit_report: AuditReport | None = None
     
     # User interaction
     questions_for_user: list[UserQuestion] = Field(default_factory=list)

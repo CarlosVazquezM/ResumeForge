@@ -1,8 +1,8 @@
 """Evidence Card schema definitions."""
 
 import re
+
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
 
 
 class MetricEntry(BaseModel):
@@ -10,16 +10,16 @@ class MetricEntry(BaseModel):
 
     value: str = Field(..., description="Quantified value, e.g., '75%', '340K+'")
     description: str = Field(..., description="What the metric represents")
-    context: Optional[str] = Field(None, description="Additional context")
+    context: str | None = Field(None, description="Additional context")
 
 
 class ScopeInfo(BaseModel):
     """Scope information for an evidence card."""
 
-    team_size: Optional[int] = None
-    direct_reports: Optional[int] = None
+    team_size: int | None = None
+    direct_reports: int | None = None
     geography: list[str] = Field(default_factory=list)
-    budget: Optional[str] = None
+    budget: str | None = None
 
 
 class EvidenceCard(BaseModel):

@@ -1,7 +1,6 @@
 """Base provider interface."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 
 class BaseProvider(ABC):
@@ -23,7 +22,7 @@ class BaseProvider(ABC):
         self,
         prompt: str,
         *,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
         **kwargs

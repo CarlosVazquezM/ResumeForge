@@ -1,0 +1,196 @@
+{
+  "$defs": {
+    "MetricEntry": {
+      "description": "A single metric entry.",
+      "properties": {
+        "value": {
+          "description": "Quantified value, e.g., '75%', '340K+'",
+          "title": "Value",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the metric represents",
+          "title": "Description",
+          "type": "string"
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additional context",
+          "title": "Context"
+        }
+      },
+      "required": [
+        "value",
+        "description"
+      ],
+      "title": "MetricEntry",
+      "type": "object"
+    },
+    "ScopeInfo": {
+      "description": "Scope information for an evidence card.",
+      "properties": {
+        "team_size": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Team Size"
+        },
+        "direct_reports": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direct Reports"
+        },
+        "geography": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Geography",
+          "type": "array"
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Budget"
+        }
+      },
+      "title": "ScopeInfo",
+      "type": "object"
+    }
+  },
+  "description": "An evidence card representing verifiable career information.",
+  "example": {
+    "company": "PayScale",
+    "id": "nostromo-etl-metrics",
+    "leadership_signals": [
+      "cross-geo management",
+      "zero voluntary attrition"
+    ],
+    "metrics": [
+      {
+        "context": "nightly",
+        "description": "employee records processed",
+        "value": "340K+"
+      },
+      {
+        "description": "client integrations",
+        "value": "520+"
+      },
+      {
+        "description": "reduction in release defects",
+        "value": "75%"
+      }
+    ],
+    "project": "Nostromo HRIS Integration Platform",
+    "raw_text": "Led development of Nostromo platform processing 340K+ employee records nightly across 520+ client integrations, achieving 75% reduction in release defects.",
+    "role": "Senior Manager, Software Engineering",
+    "scope": {
+      "budget": null,
+      "direct_reports": 19,
+      "geography": [
+        "US",
+        "Romania"
+      ],
+      "team_size": 19
+    },
+    "skills": [
+      "ETL",
+      "distributed systems",
+      ".NET/C#",
+      "microservices"
+    ],
+    "timeframe": "2020-2024"
+  },
+  "properties": {
+    "id": {
+      "description": "Unique identifier, e.g., 'nostromo-etl-metrics'",
+      "title": "Id",
+      "type": "string"
+    },
+    "project": {
+      "description": "Project or initiative name",
+      "title": "Project",
+      "type": "string"
+    },
+    "company": {
+      "title": "Company",
+      "type": "string"
+    },
+    "timeframe": {
+      "description": "YYYY-YYYY or YYYY-MM to YYYY-MM",
+      "title": "Timeframe",
+      "type": "string"
+    },
+    "role": {
+      "description": "Job title during this work",
+      "title": "Role",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/ScopeInfo"
+    },
+    "metrics": {
+      "items": {
+        "$ref": "#/$defs/MetricEntry"
+      },
+      "title": "Metrics",
+      "type": "array"
+    },
+    "skills": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Skills",
+      "type": "array"
+    },
+    "leadership_signals": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Leadership Signals",
+      "type": "array"
+    },
+    "raw_text": {
+      "description": "Original source paragraph",
+      "title": "Raw Text",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "project",
+    "company",
+    "timeframe",
+    "role",
+    "raw_text"
+  ],
+  "title": "EvidenceCard",
+  "type": "object"
+}

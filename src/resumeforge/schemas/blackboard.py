@@ -1,6 +1,6 @@
 """Blackboard state schema definitions."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Literal
 from enum import Enum
 
@@ -109,7 +109,27 @@ class ClaimMapping(BaseModel):
 
     bullet_id: str = Field(..., description="e.g., 'experience-payscale-bullet-1'")
     bullet_text: str
-    evidence_card_ids: list[str]
+    evidence_card_ids: list[str] = Field(..., min_length=1)
+
+    @field_validator("evidence_card_ids")
+    @classmethod
+    def validate_evidence_card_ids(cls, v: list[str]) -> list[str]:
+        """Ensure at least one evidence card ID is provided (truthfulness guarantee)."""
+        if not v:
+            raise ValueError("ClaimMapping must reference at least one evidence_card_id")
+        return v
+
+    def validate_against_cards(self, available_card_ids: set[str]) -> bool:
+        """
+        Validate that all referenced evidence cards exist.
+        
+        Args:
+            available_card_ids: Set of available evidence card IDs
+            
+        Returns:
+            True if all referenced cards exist
+        """
+        return set(self.evidence_card_ids).issubset(available_card_ids)
 
 
 # Audit Models
@@ -185,3 +205,75 @@ class Blackboard(BaseModel):
     current_step: str = "init"
     retry_count: int = 0
     max_retries: int = 3
+
+    def get_selected_evidence_cards(self) -> list[EvidenceCard]:
+        """
+        Get EvidenceCard objects for all selected evidence card IDs.
+        
+        Returns:
+            List of EvidenceCard objects that match selected_evidence_ids
+        """
+        card_dict = {card.id: card for card in self.evidence_cards}
+        return [card_dict[card_id] for card_id in self.selected_evidence_ids if card_id in card_dict]
+
+    def validate_state(self) -> tuple[bool, list[str]]:
+        """
+        Validate that the blackboard is in a valid state for the current step.
+        
+        Returns:
+            Tuple of (is_valid, list_of_errors)
+        """
+        errors = []
+        
+        # State validation based on current_step
+        if self.current_step in ("evidence_mapping", "writing", "auditing"):
+            if not self.role_profile:
+                errors.append("role_profile required for evidence_mapping step")
+            if not self.requirements:
+                errors.append("requirements required for evidence_mapping step")
+        
+        if self.current_step in ("writing", "auditing"):
+            if not self.evidence_map:
+                errors.append("evidence_map required for writing step")
+            if not self.selected_evidence_ids:
+                errors.append("selected_evidence_ids required for writing step")
+        
+        if self.current_step == "auditing":
+            if not self.resume_draft:
+                errors.append("resume_draft required for auditing step")
+            if not self.claim_index:
+                errors.append("claim_index required for auditing step")
+        
+        # Validate claim_index references
+        if self.claim_index:
+            available_ids = {card.id for card in self.evidence_cards}
+            for claim in self.claim_index:
+                if not claim.validate_against_cards(available_ids):
+                    errors.append(
+                        f"Claim {claim.bullet_id} references non-existent evidence cards: "
+                        f"{set(claim.evidence_card_ids) - available_ids}"
+                    )
+        
+        # Validate selected_evidence_ids exist
+        if self.selected_evidence_ids:
+            available_ids = {card.id for card in self.evidence_cards}
+            missing = set(self.selected_evidence_ids) - available_ids
+            if missing:
+                errors.append(f"selected_evidence_ids references non-existent cards: {missing}")
+        
+        return len(errors) == 0, errors
+
+    def get_evidence_card_by_id(self, card_id: str) -> EvidenceCard | None:
+        """
+        Get an evidence card by its ID.
+        
+        Args:
+            card_id: The evidence card ID
+            
+        Returns:
+            EvidenceCard if found, None otherwise
+        """
+        for card in self.evidence_cards:
+            if card.id == card_id:
+                return card
+        return None

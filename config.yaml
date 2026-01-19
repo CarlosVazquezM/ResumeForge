@@ -84,7 +84,7 @@ providers:
     timeout_seconds: 45
     max_retries: 2
   anthropic:
-    timeout_seconds: 45
+    timeout_seconds: 120  # Increased for large document parsing
     max_retries: 2
   google:
     timeout_seconds: 45

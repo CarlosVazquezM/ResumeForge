@@ -30,9 +30,9 @@ class AnthropicProvider(BaseProvider):
         self.client = Anthropic(api_key=api_key, timeout=timeout_seconds)
     
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(2),  # Reduced retries - timeouts are likely to repeat
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((RateLimitError, APITimeoutError)),
+        retry=retry_if_exception_type(RateLimitError),  # Only retry rate limits, not timeouts
         reraise=True
     )
     def generate_text(
@@ -94,8 +94,16 @@ class AnthropicProvider(BaseProvider):
             self.logger.error("rate_limit_exceeded", error=str(e))
             raise ProviderError(f"Anthropic rate limit exceeded: {e}") from e
         except APITimeoutError as e:
-            self.logger.error("timeout", error=str(e))
-            raise ProviderError(f"Anthropic request timeout: {e}") from e
+            self.logger.error(
+                "timeout",
+                error=str(e),
+                note="This may indicate the request is too large. Consider using --dry-run to estimate cost first."
+            )
+            raise ProviderError(
+                f"Anthropic request timeout: {e}\n"
+                "💡 Tip: Very large resumes may timeout. Try using --dry-run first to estimate cost, "
+                "or consider splitting your resume into smaller sections."
+            ) from e
         except APIError as e:
             self.logger.error("api_error", error=str(e), error_type=type(e).__name__)
             raise ProviderError(f"Anthropic API error: {e}") from e

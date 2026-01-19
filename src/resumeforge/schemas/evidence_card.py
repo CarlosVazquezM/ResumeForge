@@ -20,6 +20,14 @@ class ScopeInfo(BaseModel):
     direct_reports: int | None = None
     geography: list[str] = Field(default_factory=list)
     budget: str | None = None
+    
+    @field_validator("geography", mode="before")
+    @classmethod
+    def normalize_geography(cls, v):
+        """Convert None to empty list for geography."""
+        if v is None:
+            return []
+        return v
 
 
 class EvidenceCard(BaseModel):

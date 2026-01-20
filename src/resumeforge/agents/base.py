@@ -1,12 +1,14 @@
 """Base agent interface."""
 
 import json
+import time
 from abc import ABC, abstractmethod
 
 import structlog
 
 from resumeforge.exceptions import ProviderError, ValidationError
 from resumeforge.schemas.blackboard import Blackboard
+from resumeforge.utils.cost_estimator import estimate_cost
 
 logger = structlog.get_logger(__name__)
 
@@ -69,13 +71,14 @@ class BaseAgent(ABC):
             ProviderError: If LLM call fails
             ValidationError: If response parsing fails
         """
+        start_time = time.time()
         self.logger.info("Executing agent", step=blackboard.current_step)
         
         # Get prompts
         system_prompt = self.get_system_prompt()
         user_prompt = self.build_user_prompt(blackboard)
         
-        # Log token estimates
+        # Count input tokens
         input_tokens = self.provider.count_tokens(system_prompt + user_prompt)
         self.logger.debug("Token estimates", input_tokens=input_tokens, max_output_tokens=self.max_tokens)
         
@@ -94,6 +97,9 @@ class BaseAgent(ABC):
                 **kwargs
             )
             
+            # Count output tokens
+            output_tokens = self.provider.count_tokens(response)
+            
             self.logger.debug("Received LLM response", response_length=len(response))
             
         except ProviderError:
@@ -103,10 +109,61 @@ class BaseAgent(ABC):
             self.logger.error("LLM call failed", error=str(e))
             raise ProviderError(f"Failed to execute {self.__class__.__name__}: {e}") from e
         
+        # Calculate execution time and cost
+        execution_time = time.time() - start_time
+        
+        # Get provider name for cost estimation
+        provider_name = self.provider.__class__.__name__.replace("Provider", "").lower()
+        # Handle OpenAI -> openai, Anthropic -> anthropic, etc.
+        if provider_name == "openai":
+            provider_name = "openai"
+        elif provider_name == "anthropic":
+            provider_name = "anthropic"
+        elif provider_name == "google":
+            provider_name = "google"
+        elif provider_name == "groq":
+            provider_name = "groq"
+        
+        # Estimate cost
+        cost_info = estimate_cost(
+            provider_name=provider_name,
+            model=self.provider.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        cost_usd = cost_info.get("estimated_cost_usd", 0.0)
+        
+        # Log performance metrics
+        self.logger.info(
+            "Agent execution completed",
+            execution_time_seconds=execution_time,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            cost_usd=cost_usd,
+            provider=provider_name,
+            model=self.provider.model,
+        )
+        
+        # Store metrics in blackboard if available (set by orchestrator)
+        # Use getattr with default to avoid AttributeError
+        performance_metrics = getattr(blackboard, "performance_metrics", None)
+        if performance_metrics:
+            # Convert CamelCase class name to snake_case agent name
+            # e.g., "JDAnalystAgent" -> "jd_analyst", "EvidenceMapperAgent" -> "evidence_mapper"
+            class_name = self.__class__.__name__.replace("Agent", "")
+            agent_name = self._camel_to_snake(class_name)
+            performance_metrics.record_agent_execution(
+                agent_name=agent_name,
+                duration=execution_time,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost=cost_usd,
+            )
+        
         # Parse and update blackboard
         try:
             updated_blackboard = self.parse_response(response, blackboard)
-            self.logger.info("Agent execution completed successfully")
             return updated_blackboard
             
         except json.JSONDecodeError as e:
@@ -122,6 +179,30 @@ class BaseAgent(ABC):
         except Exception as e:
             self.logger.error("Failed to parse response", error=str(e))
             raise ValidationError(f"Failed to parse response from {self.__class__.__name__}: {e}") from e
+    
+    @staticmethod
+    def _camel_to_snake(name: str) -> str:
+        """
+        Convert CamelCase to snake_case.
+        
+        Examples:
+            "JDAnalyst" -> "jd_analyst"
+            "EvidenceMapper" -> "evidence_mapper"
+            "ResumeWriter" -> "resume_writer"
+            "Auditor" -> "auditor"
+        
+        Args:
+            name: CamelCase string
+            
+        Returns:
+            snake_case string
+        """
+        import re
+        # Insert underscore before uppercase letters (except at start)
+        # Then convert to lowercase
+        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+        s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1)
+        return s2.lower()
     
     def _extract_json(self, text: str) -> str:
         """

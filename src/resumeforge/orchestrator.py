@@ -11,6 +11,8 @@ import structlog
 from resumeforge.exceptions import OrchestrationError
 from resumeforge.schemas.blackboard import Blackboard
 from resumeforge.schemas.evidence_card import EvidenceCard
+from resumeforge.utils.cache import load_evidence_cards_cached
+from resumeforge.utils.metrics import PerformanceMetrics, timed_operation
 
 if TYPE_CHECKING:
     from resumeforge.agents.base import BaseAgent
@@ -104,6 +106,7 @@ class PipelineOrchestrator:
         self.config = config
         self.agents = agents
         self.logger = logger.bind(orchestrator="PipelineOrchestrator")
+        self.metrics = PerformanceMetrics()
 
     def run(self, blackboard: Blackboard) -> Blackboard:
         """
@@ -118,6 +121,7 @@ class PipelineOrchestrator:
         Raises:
             OrchestrationError: If pipeline fails or invalid state transition
         """
+        self.metrics.start_pipeline()
         state = PipelineState.INIT
         self.logger.info("Pipeline started", initial_state=state.name)
 
@@ -170,11 +174,15 @@ class PipelineOrchestrator:
                 break
 
         if state == PipelineState.COMPLETE:
+            self.metrics.end_pipeline()
             self.logger.info("Pipeline completed successfully")
             blackboard.current_step = "complete"
+            self.metrics.log_summary()
             self._save_outputs(blackboard)
         elif state == PipelineState.FAILED:
+            self.metrics.end_pipeline()
             self.logger.error("Pipeline failed", final_step=blackboard.current_step)
+            self.metrics.log_summary()
             raise OrchestrationError(
                 f"Pipeline failed at step: {blackboard.current_step}"
             )
@@ -202,21 +210,54 @@ class PipelineOrchestrator:
             if not agent:
                 raise OrchestrationError("JD Analyst agent not found")
             self.logger.info("Executing JD Analyst agent")
-            return agent.execute(blackboard)
+            # Attach metrics to blackboard for agent to record (using setattr to avoid Pydantic validation)
+            blackboard.__dict__["performance_metrics"] = self.metrics
+            with timed_operation("JD Analysis"):
+                result = agent.execute(blackboard)
+            return result
 
         elif state == PipelineState.EVIDENCE_MAPPING:
             agent = self.agents.get("evidence_mapper")
             if not agent:
                 raise OrchestrationError("Evidence Mapper agent not found")
+            
+            # Pre-filter evidence cards if JD analysis is complete (token optimization)
+            if blackboard.role_profile:
+                # Extract keywords from role profile
+                jd_keywords = []
+                if blackboard.role_profile.keyword_clusters:
+                    for cluster in blackboard.role_profile.keyword_clusters.values():
+                        jd_keywords.extend(cluster)
+                jd_keywords.extend(blackboard.role_profile.must_haves)
+                jd_keywords.extend(blackboard.role_profile.nice_to_haves)
+                
+                # Filter evidence cards before sending to Evidence Mapper
+                original_count = len(blackboard.evidence_cards)
+                blackboard.evidence_cards = self._filter_relevant_evidence_cards(
+                    blackboard.evidence_cards, jd_keywords
+                )
+                if len(blackboard.evidence_cards) < original_count:
+                    self.logger.info(
+                        "Evidence cards pre-filtered for Evidence Mapper",
+                        original=original_count,
+                        filtered=len(blackboard.evidence_cards),
+                    )
+            
             self.logger.info("Executing Evidence Mapper agent")
-            return agent.execute(blackboard)
+            # Attach metrics to blackboard for agent to record
+            blackboard.__dict__["performance_metrics"] = self.metrics
+            with timed_operation("Evidence Mapping"):
+                return agent.execute(blackboard)
 
         elif state == PipelineState.WRITING:
             agent = self.agents.get("resume_writer") or self.agents.get("writer")
             if not agent:
                 raise OrchestrationError("Resume Writer agent not found")
             self.logger.info("Executing Resume Writer agent")
-            return agent.execute(blackboard)
+            # Attach metrics to blackboard for agent to record
+            blackboard.__dict__["performance_metrics"] = self.metrics
+            with timed_operation("Resume Writing"):
+                return agent.execute(blackboard)
 
         elif state == PipelineState.AUDITING:
             # Try both "auditor" and "truth_auditor" keys for compatibility
@@ -226,7 +267,10 @@ class PipelineOrchestrator:
                     "Auditor agent not found. Expected key 'auditor' or 'truth_auditor' in agents dict."
                 )
             self.logger.info("Executing Auditor agent")
-            return agent.execute(blackboard)
+            # Attach metrics to blackboard for agent to record
+            blackboard.__dict__["performance_metrics"] = self.metrics
+            with timed_operation("Auditing"):
+                return agent.execute(blackboard)
 
         elif state == PipelineState.REVISION:
             blackboard.retry_count += 1
@@ -296,40 +340,14 @@ class PipelineOrchestrator:
                     f"Error: {e}"
                 ) from e
 
-        if not evidence_path.exists():
-            raise OrchestrationError(
-                f"Evidence cards file not found: {evidence_path}. "
-                "Run 'resumeforge parse' first to generate evidence cards."
-            )
-
+        # Load evidence cards using cache
         try:
-            with open(evidence_path) as f:
-                loaded_data = json.load(f)
-
-            # Handle both formats: direct list or wrapped in dict with "evidence_cards" key
-            if isinstance(loaded_data, list):
-                cards_data = loaded_data
-            elif isinstance(loaded_data, dict) and "evidence_cards" in loaded_data:
-                cards_data = loaded_data["evidence_cards"]
-            else:
-                raise OrchestrationError(
-                    f"Invalid evidence cards format. Expected list or dict with 'evidence_cards' key, "
-                    f"got {type(loaded_data).__name__}"
-                )
-
-            # Validate and parse evidence cards
-            blackboard.evidence_cards = [
-                EvidenceCard(**card_data) for card_data in cards_data
-            ]
+            with timed_operation("Evidence Cards Loading"):
+                blackboard.evidence_cards = load_evidence_cards_cached(evidence_path)
             self.logger.info(
                 "Evidence cards loaded",
                 count=len(blackboard.evidence_cards),
             )
-
-        except json.JSONDecodeError as e:
-            raise OrchestrationError(
-                f"Invalid JSON in evidence cards file: {e}"
-            ) from e
         except OrchestrationError:
             # Re-raise OrchestrationError without wrapping (preserves specific error messages)
             raise
@@ -346,6 +364,74 @@ class PipelineOrchestrator:
         )
 
         return blackboard
+    
+    def _filter_relevant_evidence_cards(
+        self,
+        all_cards: list[EvidenceCard],
+        jd_keywords: list[str] | None = None,
+    ) -> list[EvidenceCard]:
+        """
+        Filter evidence cards that might be relevant to JD keywords.
+        
+        This pre-filtering reduces token usage by only sending potentially
+        relevant cards to the Evidence Mapper agent.
+        
+        Args:
+            all_cards: All available evidence cards
+            jd_keywords: List of keywords extracted from JD (if available)
+            
+        Returns:
+            Filtered list of potentially relevant evidence cards
+        """
+        if not jd_keywords:
+            # If no keywords available yet, return all cards (filtering will happen later)
+            return all_cards
+        
+        # Normalize keywords for matching (lowercase)
+        jd_keywords_lower = [kw.lower() for kw in jd_keywords if kw]
+        
+        if not jd_keywords_lower:
+            return all_cards
+        
+        relevant = []
+        for card in all_cards:
+            # Build searchable text from card
+            card_text_parts = [
+                card.project.lower(),
+                card.raw_text.lower(),
+                " ".join(card.skills).lower(),
+                " ".join(card.leadership_signals).lower(),
+                card.role.lower(),
+            ]
+            card_text = " ".join(card_text_parts)
+            
+            # Check if any JD keyword appears in card text
+            # Simple substring matching (could be enhanced with fuzzy matching)
+            if any(kw in card_text for kw in jd_keywords_lower):
+                relevant.append(card)
+        
+        # Guard against empty input to prevent division by zero
+        if len(all_cards) == 0:
+            return relevant
+        
+        # If filtering too aggressive (less than 20% of cards), return all
+        # This prevents over-filtering that might miss relevant cards
+        if len(relevant) < len(all_cards) * 0.2:
+            self.logger.warning(
+                "Evidence filtering too aggressive, returning all cards",
+                filtered_count=len(relevant),
+                total_count=len(all_cards),
+            )
+            return all_cards
+        
+        self.logger.info(
+            "Evidence cards filtered",
+            original_count=len(all_cards),
+            filtered_count=len(relevant),
+            reduction_percent=round((1 - len(relevant) / len(all_cards)) * 100, 1),
+        )
+        
+        return relevant
 
     def _build_synonyms(self, blackboard: Blackboard) -> dict[str, list[str]]:
         """

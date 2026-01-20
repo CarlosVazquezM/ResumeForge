@@ -36,6 +36,158 @@ structlog.configure(
 logger = structlog.get_logger(__name__)
 
 
+def handle_error_interactive(error: Exception, context: dict | None = None, auto_yes: bool = False) -> bool:
+    """
+    Handle errors interactively, showing details and prompting for retry/cancel.
+    
+    Args:
+        error: The exception that occurred
+        context: Optional context dictionary with additional info (e.g., {'step': 'parsing', 'attempt': 1})
+        auto_yes: If True, automatically retry without prompting (for --yes flag)
+        
+    Returns:
+        True if user wants to retry, False if they want to cancel
+    """
+    context = context or {}
+    step = context.get('step', 'operation')
+    attempt = context.get('attempt', 1)
+    
+    # Categorize errors
+    error_type = type(error).__name__
+    error_msg = str(error)
+    
+    # Determine if error is retryable
+    is_retryable = False
+    error_category = "Unknown"
+    suggestions = []
+    
+    if isinstance(error, ProviderError):
+        error_category = "Provider/Network Error"
+        error_lower = error_msg.lower()
+        
+        if "timeout" in error_lower:
+            is_retryable = True
+            suggestions = [
+                "• The request may have timed out due to network issues",
+                "• Very large resumes may take longer than expected",
+                "• Try again - timeouts can be transient",
+                "• Check your internet connection",
+            ]
+        elif "rate limit" in error_lower or "429" in error_msg:
+            is_retryable = True
+            suggestions = [
+                "• API rate limit exceeded - wait a moment and try again",
+                "• Consider using a different provider if available",
+            ]
+        elif "api key" in error_lower or "authentication" in error_lower:
+            is_retryable = False
+            suggestions = [
+                "• Check that your API key is set correctly",
+                f"• Verify the {context.get('provider', 'provider')} API key in your environment",
+            ]
+        elif "connection" in error_lower or "network" in error_lower:
+            is_retryable = True
+            suggestions = [
+                "• Network connection issue detected",
+                "• Check your internet connection",
+                "• Try again in a moment",
+            ]
+        else:
+            is_retryable = True  # Most provider errors are transient
+            suggestions = [
+                "• This may be a temporary API issue",
+                "• Try again - many provider errors are transient",
+            ]
+    
+    elif isinstance(error, ValidationError):
+        error_category = "Validation Error"
+        is_retryable = False
+        suggestions = [
+            "• The LLM response may be invalid or malformed",
+            "• Check your input format (fact resume or evidence cards)",
+            "• The model may have produced unexpected output",
+        ]
+    
+    elif isinstance(error, ConfigError):
+        error_category = "Configuration Error"
+        is_retryable = False
+        suggestions = [
+            "• Check your config.yaml file",
+            "• Verify all required settings are present",
+            "• Ensure model aliases are correctly defined",
+        ]
+    
+    elif isinstance(error, OrchestrationError):
+        error_category = "Pipeline Error"
+        is_retryable = True  # Pipeline errors might be retryable depending on context
+        suggestions = [
+            "• The pipeline failed during execution",
+            f"• Failed at step: {context.get('current_step', 'unknown')}",
+            "• Check the error details above",
+        ]
+        if context.get('retry_count', 0) > 0:
+            suggestions.append(f"• Already retried {context['retry_count']} times")
+    
+    elif isinstance(error, FileNotFoundError):
+        error_category = "File Not Found"
+        is_retryable = False
+        suggestions = [
+            "• Verify the file path is correct",
+            "• Check that the file exists",
+            "• Ensure you have read permissions",
+        ]
+    
+    else:
+        error_category = "Unexpected Error"
+        is_retryable = True  # Give user option to retry unexpected errors
+        suggestions = [
+            "• This is an unexpected error",
+            "• Check the error message above for details",
+            "• You may want to report this issue",
+        ]
+    
+    # Display error information
+    click.echo(f"\n{'='*60}", err=True)
+    click.echo(f"❌ Error: {error_category}", err=True)
+    click.echo(f"{'='*60}", err=True)
+    click.echo(f"\n📋 Details:", err=True)
+    click.echo(f"   Step: {step}", err=True)
+    if attempt > 1:
+        click.echo(f"   Attempt: {attempt}", err=True)
+    click.echo(f"   Error Type: {error_type}", err=True)
+    click.echo(f"   Message: {error_msg}", err=True)
+    
+    if suggestions:
+        click.echo(f"\n💡 Suggestions:", err=True)
+        for suggestion in suggestions:
+            click.echo(f"   {suggestion}", err=True)
+    
+    click.echo(f"\n{'='*60}", err=True)
+    
+    # Handle retry logic
+    if not is_retryable:
+        click.echo("\n⚠️  This error is not retryable. Please fix the issue and try again.", err=True)
+        return False
+    
+    if auto_yes:
+        click.echo(f"\n🔄 Auto-retrying (--yes flag enabled)...", err=True)
+        return True
+    
+    # Prompt user
+    click.echo(f"\n❓ What would you like to do?", err=True)
+    click.echo("   [R]etry - Try the operation again", err=True)
+    click.echo("   [C]ancel - Exit and fix the issue manually", err=True)
+    
+    while True:
+        choice = click.prompt("   Your choice", default="C", type=click.Choice(["R", "r", "C", "c"], case_sensitive=False), err=True)
+        if choice.upper() == "R":
+            click.echo("\n🔄 Retrying operation...")
+            return True
+        elif choice.upper() == "C":
+            click.echo("\n❌ Operation cancelled by user.")
+            return False
+
+
 @click.group()
 @click.version_option(version=__version__)
 def cli():
@@ -58,6 +210,11 @@ def cli():
               help="Skip confirmation prompt and proceed automatically")
 def parse(fact_resume: Path, output: Path, config: Path, dry_run: bool, estimate_only: bool, yes: bool):
     """Parse fact resume into evidence cards (one-time setup)."""
+    # Initialize attempt counter before try block to avoid UnboundLocalError
+    # if exceptions occur before parsing logic
+    attempt = 1
+    max_attempts = 5  # Reasonable limit to prevent infinite loops
+    
     try:
         dry_run_mode = dry_run or estimate_only
         
@@ -114,42 +271,74 @@ def parse(fact_resume: Path, output: Path, config: Path, dry_run: bool, estimate
                 click.echo("❌ Cancelled by user")
                 return
         
-        # Parse resume
+        # Parse resume with retry logic
         click.echo("🔍 Parsing resume into evidence cards...")
-        evidence_cards = parser.parse(fact_resume, dry_run=False)
+        click.echo("   ⏳ This may take 1-3 minutes for large resumes. Please wait...")
         
-        # Ensure output directory exists
-        output.parent.mkdir(parents=True, exist_ok=True)
+        # Reset attempt counter for parsing retry loop
+        attempt = 1
         
-        # Save to JSON
-        click.echo(f"💾 Saving {len(evidence_cards)} evidence cards to {output}...")
-        with open(output, "w", encoding="utf-8") as f:
-            json.dump(
-                [card.model_dump() for card in evidence_cards],
-                f,
-                indent=2,
-                ensure_ascii=False
-            )
-        
-        click.echo(f"✅ Successfully parsed {len(evidence_cards)} evidence cards!")
-        click.echo(f"📋 Evidence cards saved to: {output}")
+        while attempt <= max_attempts:
+            try:
+                evidence_cards = parser.parse(fact_resume, dry_run=False)
+                
+                # Success - save and exit
+                output.parent.mkdir(parents=True, exist_ok=True)
+                click.echo(f"💾 Saving {len(evidence_cards)} evidence cards to {output}...")
+                with open(output, "w", encoding="utf-8") as f:
+                    json.dump(
+                        [card.model_dump() for card in evidence_cards],
+                        f,
+                        indent=2,
+                        ensure_ascii=False
+                    )
+                
+                click.echo(f"✅ Successfully parsed {len(evidence_cards)} evidence cards!")
+                click.echo(f"📋 Evidence cards saved to: {output}")
+                return
+                
+            except (ProviderError, ValidationError) as e:
+                # Use interactive error handler
+                should_retry = handle_error_interactive(
+                    e,
+                    context={
+                        'step': 'parsing resume',
+                        'attempt': attempt,
+                        'provider': 'mapper_precise'
+                    },
+                    auto_yes=yes
+                )
+                
+                if should_retry and attempt < max_attempts:
+                    # User wants to retry and we haven't reached max attempts
+                    attempt += 1
+                    click.echo(f"\n🔄 Retrying (attempt {attempt}/{max_attempts})...\n")
+                    continue
+                elif not should_retry:
+                    # User chose to cancel (regardless of attempt number)
+                    raise click.Abort()
+                else:
+                    # User wants to retry but we've reached max attempts
+                    click.echo(f"\n❌ Maximum retry attempts ({max_attempts}) reached.", err=True)
+                    raise click.Abort()
         
     except FileNotFoundError as e:
-        click.echo(f"❌ File not found: {e}", err=True)
+        handle_error_interactive(e, context={'step': 'file access'}, auto_yes=yes)
         raise click.Abort()
     except ConfigError as e:
-        click.echo(f"❌ Configuration error: {e}", err=True)
-        raise click.Abort()
-    except ProviderError as e:
-        click.echo(f"❌ Provider error: {e}", err=True)
-        click.echo("💡 Make sure your API keys are set in the environment.", err=True)
-        raise click.Abort()
-    except ValidationError as e:
-        click.echo(f"❌ Validation error: {e}", err=True)
-        click.echo("💡 The LLM response may be invalid. Check your fact resume format.", err=True)
+        handle_error_interactive(e, context={'step': 'configuration'}, auto_yes=yes)
         raise click.Abort()
     except Exception as e:
-        click.echo(f"❌ Unexpected error: {e}", err=True)
+        # Catch-all for unexpected errors
+        should_retry = handle_error_interactive(
+            e,
+            context={'step': 'parsing', 'attempt': attempt},
+            auto_yes=yes
+        )
+        if should_retry and attempt < max_attempts:
+            # This won't actually retry here since we're in the outer catch,
+            # but we've shown the error to the user
+            pass
         logger.exception("Unexpected error in parse command")
         raise click.Abort()
 
@@ -253,12 +442,10 @@ def generate(jd: Path, title: str, template: Path | None, max_pages: int, output
             )
             
         except ConfigError as e:
-            click.echo(f"❌ Configuration error: {e}", err=True)
-            click.echo("💡 Check that all required model aliases are defined in config.yaml", err=True)
+            handle_error_interactive(e, context={'step': 'agent initialization'}, auto_yes=yes)
             raise click.Abort()
         except ProviderError as e:
-            click.echo(f"❌ Provider error: {e}", err=True)
-            click.echo("💡 Make sure your API keys are set in the environment.", err=True)
+            handle_error_interactive(e, context={'step': 'agent initialization'}, auto_yes=yes)
             raise click.Abort()
         
         click.echo("✅ All agents initialized")
@@ -326,40 +513,45 @@ def generate(jd: Path, title: str, template: Path | None, max_pages: int, output
             click.echo("   • audit_report.json - Truth audit results")
             
         except OrchestrationError as e:
-            click.echo(f"\n❌ Pipeline failed: {e}", err=True)
-            click.echo(f"   Failed at step: {blackboard.current_step}", err=True)
+            # Build context with pipeline details
+            context = {
+                'step': 'pipeline execution',
+                'current_step': blackboard.current_step,
+                'retry_count': blackboard.retry_count,
+            }
             
-            if blackboard.retry_count > 0:
-                click.echo(f"   Retry attempts: {blackboard.retry_count}/{blackboard.max_retries}", err=True)
-            
+            # Add truth violations to context if available
             if blackboard.audit_report and blackboard.audit_report.truth_violations:
+                context['truth_violations'] = len(blackboard.audit_report.truth_violations)
+                # Show truth violations before error handler
                 click.echo(f"\n⚠️  Truth violations found:", err=True)
-                for violation in blackboard.audit_report.truth_violations[:5]:  # Show first 5
+                for violation in blackboard.audit_report.truth_violations[:5]:
                     click.echo(f"   • {violation.bullet_id}: {violation.violation}", err=True)
                 if len(blackboard.audit_report.truth_violations) > 5:
                     click.echo(f"   ... and {len(blackboard.audit_report.truth_violations) - 5} more", err=True)
             
+            # Show error details (pipeline errors are usually not retryable at CLI level
+            # since orchestrator handles internal retries)
+            handle_error_interactive(e, context=context, auto_yes=yes)
             raise click.Abort()
         
     except FileNotFoundError as e:
-        click.echo(f"❌ File not found: {e}", err=True)
+        handle_error_interactive(e, context={'step': 'file access'}, auto_yes=yes)
         raise click.Abort()
     except ConfigError as e:
-        click.echo(f"❌ Configuration error: {e}", err=True)
+        handle_error_interactive(e, context={'step': 'configuration'}, auto_yes=yes)
         raise click.Abort()
     except ProviderError as e:
-        click.echo(f"❌ Provider error: {e}", err=True)
-        click.echo("💡 Make sure your API keys are set in the environment.", err=True)
+        handle_error_interactive(e, context={'step': 'pipeline execution'}, auto_yes=yes)
         raise click.Abort()
     except ValidationError as e:
-        click.echo(f"❌ Validation error: {e}", err=True)
-        click.echo("💡 Check that evidence cards exist. Run 'resumeforge parse' first.", err=True)
+        handle_error_interactive(e, context={'step': 'validation'}, auto_yes=yes)
         raise click.Abort()
     except KeyboardInterrupt:
         click.echo("\n⚠️  Pipeline interrupted by user", err=True)
         raise click.Abort()
     except Exception as e:
-        click.echo(f"❌ Unexpected error: {e}", err=True)
+        handle_error_interactive(e, context={'step': 'pipeline execution'}, auto_yes=yes)
         logger.exception("Unexpected error in generate command")
         raise click.Abort()
 

@@ -81,16 +81,16 @@ agents:
 
 providers:
   openai:
-    timeout_seconds: 45
+    timeout_seconds: 300
     max_retries: 2
   anthropic:
-    timeout_seconds: 120  # Increased for large document parsing
+    timeout_seconds: 300  # Increased to 5 minutes for large document parsing (one-time operation)
     max_retries: 2
   google:
-    timeout_seconds: 45
+    timeout_seconds: 300
     max_retries: 2
   groq:
-    timeout_seconds: 30
+    timeout_seconds: 300
     max_retries: 2
 
 # Provider fallback chain:

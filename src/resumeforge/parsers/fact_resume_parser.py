@@ -111,13 +111,19 @@ class FactResumeParser:
             }
         
         # Call LLM
-        self.logger.info("Calling LLM to parse resume into evidence cards")
+        self.logger.info(
+            "Calling LLM to parse resume into evidence cards",
+            resume_size_chars=len(resume_text),
+            timeout_seconds=self.provider.timeout_seconds,
+            max_tokens=16384
+        )
         try:
             # Try to use JSON mode for OpenAI, but it's optional for other providers
             kwargs = {}
             if hasattr(self.provider, "model") and "gpt" in self.provider.model.lower():
                 kwargs["response_format"] = {"type": "json_object"}
             
+            self.logger.info("Sending request to LLM (this may take 1-3 minutes for large resumes)...")
             response = self.provider.generate_text(
                 prompt=user_prompt,
                 system_prompt=system_prompt,
@@ -125,6 +131,7 @@ class FactResumeParser:
                 max_tokens=16384,  # Increased for comprehensive extraction (30-40+ cards)
                 **kwargs
             )
+            self.logger.info("Received response from LLM", response_length=len(response))
         except ProviderError:
             # Re-raise ProviderError without wrapping (preserves original error message)
             raise

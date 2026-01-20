@@ -5,11 +5,15 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# Constants
+DEFAULT_TIMEOUT_SECONDS = 45
+DEFAULT_MAX_RETRIES = 2
+
 
 class BaseProvider(ABC):
     """Abstract base class for LLM providers."""
     
-    def __init__(self, api_key: str, model: str, timeout_seconds: int = 45, max_retries: int = 2):
+    def __init__(self, api_key: str, model: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, max_retries: int = DEFAULT_MAX_RETRIES):
         """
         Initialize provider.
         

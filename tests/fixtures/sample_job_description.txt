@@ -1,0 +1,26 @@
+Senior Engineering Manager - Platform Engineering
+
+We are seeking an experienced Senior Engineering Manager to lead our Platform Engineering team. This role requires strong technical leadership, team management experience, and expertise in cloud infrastructure.
+
+Required Qualifications:
+- 5+ years of engineering management experience
+- Experience leading teams of 10+ engineers
+- Strong background in cloud infrastructure (AWS, Azure, or GCP)
+- Experience with microservices architecture
+- Proven track record of improving team productivity and quality
+- Experience with CI/CD pipelines and DevOps practices
+
+Preferred Qualifications:
+- Experience managing distributed/remote teams
+- Background in enterprise SaaS platforms
+- Experience with infrastructure modernization projects
+- Strong communication and collaboration skills
+
+Key Responsibilities:
+- Lead and grow a team of 15-20 engineers
+- Drive technical strategy and architecture decisions
+- Improve engineering processes and quality metrics
+- Collaborate with product, architecture, and DevOps teams
+- Manage team budget and resource allocation
+
+This role reports to the Director of Engineering and offers opportunities for strategic impact and team growth.

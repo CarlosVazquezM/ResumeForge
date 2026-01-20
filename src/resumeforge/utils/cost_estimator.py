@@ -1,5 +1,8 @@
 """Cost estimation utilities for LLM API calls."""
 
+# Constants
+TOKENS_PER_MILLION = 1_000_000
+
 # Pricing as of January 2025 (per 1M tokens)
 # Input/Output pricing may differ
 PRICING = {
@@ -68,12 +71,23 @@ def estimate_cost(
     
     provider_pricing = PRICING[provider_name]
     
-    # Try exact model match first, then fallback
-    model_pricing = None
-    for model_key in [model, model.split("-")[0] + "-*"]:
-        if model_key in provider_pricing:
-            model_pricing = provider_pricing[model_key]
-            break
+    # Try exact model match first
+    model_pricing = provider_pricing.get(model)
+    
+    # Fallback: find models with matching prefix
+    # Matches if: requested model starts with available model OR available model starts with requested prefix
+    # Examples: "gpt-4o-turbo" matches "gpt-4o", "gpt-4" matches "gpt-4o"
+    if not model_pricing:
+        model_parts = model.split("-")
+        if len(model_parts) >= 2:
+            prefix = "-".join(model_parts[:2])  # First two parts (e.g., "gpt-4")
+            # Find first model that matches:
+            # 1. Requested model starts with available model (e.g., "gpt-4o-turbo" starts with "gpt-4o")
+            # 2. Available model starts with requested prefix (e.g., "gpt-4o" starts with "gpt-4")
+            for model_key in provider_pricing:
+                if model.startswith(model_key) or model_key.startswith(prefix):
+                    model_pricing = provider_pricing[model_key]
+                    break
     
     if not model_pricing:
         return {
@@ -85,10 +99,10 @@ def estimate_cost(
             "note": "Pricing not available for this model",
         }
     
-    input_cost = (input_tokens / 1_000_000) * model_pricing["input"]
+    input_cost = (input_tokens / TOKENS_PER_MILLION) * model_pricing["input"]
     output_cost = 0.0
     if output_tokens:
-        output_cost = (output_tokens / 1_000_000) * model_pricing["output"]
+        output_cost = (output_tokens / TOKENS_PER_MILLION) * model_pricing["output"]
     
     total_cost = input_cost + output_cost
     

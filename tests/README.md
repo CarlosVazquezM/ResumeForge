@@ -6,12 +6,23 @@ This directory contains both unit tests and integration tests.
 
 ```
 tests/
-├── unit/                    # Unit tests (mocked, no API keys needed)
+├── fixtures/                 # Test fixtures and helpers
+│   ├── sample_evidence_cards.json
+│   ├── sample_job_description.txt
+│   ├── sample_resume_template.md
+│   └── __init__.py           # Helper functions
+├── unit/                      # Unit tests (mocked, no API keys needed)
 │   ├── test_providers.py
 │   ├── test_schemas_evidence_card.py
-│   └── test_schemas_blackboard.py
-└── integration/             # Integration tests (real API calls, need API keys)
-    └── test_providers_integration.py
+│   ├── test_schemas_blackboard.py
+│   ├── test_agents_base.py
+│   ├── test_agents_jd_analyst.py
+│   ├── test_agents_evidence_mapper.py
+│   ├── test_agents_resume_writer.py
+│   └── test_agents_auditor.py
+└── integration/              # Integration tests (real API calls, need API keys)
+    ├── test_providers_integration.py
+    └── test_agents_integration.py
 ```
 
 ## Running Tests
@@ -130,6 +141,39 @@ def test_my_function_real_api():
     assert result is not None
 ```
 
+## Agent Testing
+
+### Unit Tests
+
+All agent unit tests use mocked providers and test:
+- Prompt building and validation
+- Response parsing and error handling
+- Edge cases and guardrails
+- Enum conversions (Priority, Confidence, GapStrategy)
+
+**Example:**
+```python
+from tests.fixtures import create_mock_provider, create_sample_blackboard
+from resumeforge.agents.jd_analyst import JDAnalystAgent
+
+def test_jd_analyst_parsing():
+    mock_provider = create_mock_provider(response='{"role_profile": {...}}')
+    agent = JDAnalystAgent(mock_provider, config)
+    blackboard = create_sample_blackboard()
+    result = agent.execute(blackboard)
+    assert result.role_profile is not None
+```
+
+### Integration Tests
+
+Agent integration tests make real API calls with minimal inputs:
+- JD Analyst: Small JD (~200 words)
+- Evidence Mapper: 3 evidence cards
+- Resume Writer: 2-3 evidence cards
+- Auditor: Minimal resume draft
+
+**Coverage:** 88.4% average for agents module (exceeds 80% target)
+
 ## Best Practices
 
 1. **Unit tests should be fast and isolated** - Use mocks, no network calls
@@ -137,3 +181,5 @@ def test_my_function_real_api():
 3. **Skip gracefully** - Integration tests should skip if API keys are missing
 4. **Keep tests deterministic** - Use `temperature=0.0` for LLM calls when possible
 5. **Minimize API calls** - Integration tests should be minimal to avoid costs
+6. **Use test fixtures** - Leverage `tests/fixtures/` for reusable test data
+7. **Test guardrails** - Verify no-fabrication rules and evidence-only constraints

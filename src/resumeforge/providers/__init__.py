@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from resumeforge.config import Config
 
 from resumeforge.providers.anthropic_provider import AnthropicProvider
-from resumeforge.providers.base import BaseProvider
+from resumeforge.providers.base import BaseProvider, DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES
 from resumeforge.providers.google_provider import GoogleProvider
 from resumeforge.providers.groq_provider import GroqProvider
 from resumeforge.providers.openai_provider import OpenAIProvider
@@ -82,8 +82,8 @@ def create_provider(provider_name: str, model: str, config: "Config") -> "BasePr
     
     # Get provider configuration
     provider_config = config.providers.get(provider_name, {})
-    timeout_seconds = provider_config.get("timeout_seconds", 45)
-    max_retries = provider_config.get("max_retries", 2)
+    timeout_seconds = provider_config.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+    max_retries = provider_config.get("max_retries", DEFAULT_MAX_RETRIES)
     
     # Get API key from environment
     api_key_env_var = f"{provider_name.upper()}_API_KEY"

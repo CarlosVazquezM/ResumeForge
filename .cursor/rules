@@ -135,3 +135,108 @@ When adding new functionality, generate in this order:
 5. Add unit tests + a golden test fixture
 
 Do not generate multiple competing implementations. Prefer the simplest design consistent with these rules.
+
+## Error Handling Consistency
+
+**CRITICAL**: All validation and input errors must use custom exceptions, not built-in Python exceptions.
+
+### Exception Usage Rules
+
+1. **Validation Errors**: Always use `ValidationError` from `resumeforge.exceptions`
+   - ✅ `raise ValidationError("Agent Name: field is required. Please provide...")`
+   - ❌ `raise ValueError("field is required")`
+   - ❌ `raise FileNotFoundError("file not found")`
+
+2. **Error Message Format**: All ValidationError messages must follow this pattern:
+   ```
+   "{Component Name}: {issue description}. {Suggested fix or next step}."
+   ```
+   Examples:
+   - ✅ `"JD Analyst: job_description is empty. Please provide a valid job description in blackboard.inputs.job_description"`
+   - ✅ `"Evidence Mapper: role_profile is required. Please run JD Analyst agent first to populate role_profile."`
+   - ✅ `"Fact Resume Parser: Fact resume file not found: {path}"`
+   - ❌ `"job_description is empty"`
+   - ❌ `"role_profile required"`
+
+3. **Provider Errors**: Always wrap SDK exceptions in `ProviderError` with context:
+   - ✅ `raise ProviderError(f"OpenAI rate limit exceeded: {e}") from e`
+   - ❌ `raise RateLimitError(e)`
+
+4. **File Operations**: Use `ValidationError` for file-related validation errors:
+   - ✅ `raise ValidationError(f"Fact resume file not found: {resume_path}")`
+   - ❌ `raise FileNotFoundError(f"Fact resume file not found: {resume_path}")`
+
+## Constants and Magic Numbers
+
+**CRITICAL**: Extract all magic numbers to named constants at module level.
+
+### Rules:
+1. **No magic numbers in code**: Extract to constants with descriptive names
+   - ✅ `DEFAULT_TEMPERATURE = 0.3` then use `config.get("temperature", DEFAULT_TEMPERATURE)`
+   - ❌ `config.get("temperature", 0.3)`
+
+2. **Constants naming convention**:
+   - Use `UPPER_SNAKE_CASE`
+   - Prefix with module/component name if module-specific
+   - Examples:
+     - `DEFAULT_TEMPERATURE = 0.3`
+     - `ATS_SCORING_TEMPERATURE = 0.2`
+     - `MAX_RESPONSE_PREVIEW_LENGTH = 500`
+     - `MARKDOWN_JSON_PREFIX_LENGTH = 7`
+
+3. **Common constants to extract**:
+   - Retry counts: `DEFAULT_MAX_RETRIES = 2`, `OPENAI_MAX_RETRIES = 3`
+   - Timeouts: `DEFAULT_TIMEOUT_SECONDS = 45`
+   - Token limits: `DEFAULT_MAX_TOKENS = 4096`, `ATS_SCORING_MAX_TOKENS = 2048`
+   - String lengths: `MAX_RESPONSE_PREVIEW_LENGTH = 500`
+   - Numeric divisors: `TOKENS_PER_MILLION = 1_000_000`
+
+## Type Hints Requirements
+
+1. **All function parameters and return types must be annotated**
+   - ✅ `def parse(self, resume_path: Path) -> list[EvidenceCard]:`
+   - ❌ `def parse(self, resume_path):`
+
+2. **Use TYPE_CHECKING for forward references**:
+   ```python
+   from typing import TYPE_CHECKING
+   
+   if TYPE_CHECKING:
+       from resumeforge.providers.base import BaseProvider
+   ```
+
+3. **Prefer specific types over generic dict**:
+   - ✅ `config: Config` (when Config model exists)
+   - ⚠️ `config: dict` (acceptable if Config model not available)
+
+## Testing Requirements
+
+1. **Unit tests must use mocked providers** (no real API calls)
+   - Use `tests.fixtures.create_mock_provider()` helper
+   - All agent unit tests must pass without API keys
+
+2. **Integration tests must be marked**:
+   ```python
+   @pytest.mark.integration
+   @pytest.mark.skipif(not os.getenv("API_KEY"), reason="Requires API_KEY")
+   ```
+
+3. **Test coverage target**: Minimum 80% for agents module, 70% overall
+
+4. **Test naming**: `test_{component}_{behavior}_{expected_result}`
+   - ✅ `test_jd_analyst_parse_response_valid`
+   - ✅ `test_evidence_mapper_invalid_card_ids_filtered`
+   - ❌ `test_parse` or `test_analyst`
+
+## Code Quality Checklist
+
+Before committing code, verify:
+- [ ] All error messages follow the format: `"{Component}: {issue}. {fix}."`
+- [ ] No magic numbers (all extracted to constants)
+- [ ] All functions have type hints
+- [ ] Custom exceptions used (not ValueError, FileNotFoundError for validation)
+- [ ] Unit tests added for new functionality
+- [ ] Integration tests marked with `@pytest.mark.integration`
+- [ ] Structured logging used (`self.logger.info(...)`)
+- [ ] No `print()` statements
+- [ ] No wildcard imports (`from module import *`)

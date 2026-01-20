@@ -1,7 +1,7 @@
 """Anthropic provider implementation."""
 
 from tenacity import (
-    retry,
+    Retrying,
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
@@ -10,13 +10,12 @@ from tenacity import (
 from anthropic import Anthropic, APIError, APITimeoutError, RateLimitError
 
 from resumeforge.exceptions import ProviderError
-from resumeforge.providers.base import BaseProvider
-
+from resumeforge.providers.base import BaseProvider, DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES
 
 class AnthropicProvider(BaseProvider):
     """Anthropic provider using Claude models."""
     
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514", timeout_seconds: int = 45, max_retries: int = 2):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514", timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, max_retries: int = DEFAULT_MAX_RETRIES):
         """
         Initialize Anthropic provider.
         
@@ -29,12 +28,6 @@ class AnthropicProvider(BaseProvider):
         super().__init__(api_key, model, timeout_seconds, max_retries)
         self.client = Anthropic(api_key=api_key, timeout=timeout_seconds)
     
-    @retry(
-        stop=stop_after_attempt(2),  # Reduced retries - timeouts are likely to repeat
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(RateLimitError),  # Only retry rate limits, not timeouts
-        reraise=True
-    )
     def generate_text(
         self,
         prompt: str,
@@ -60,36 +53,54 @@ class AnthropicProvider(BaseProvider):
         Raises:
             ProviderError: If API call fails
         """
+        # Use Retrying with instance's max_retries for configuration-driven retry behavior
+        # Only retry rate limits, not timeouts (timeouts are likely to repeat)
+        # max_retries is the number of retries, so total attempts = max_retries + 1
+        # This preserves the original behavior of 3 total attempts (1 initial + 2 retries) when max_retries=2
+        retry_strategy = Retrying(
+            stop=stop_after_attempt(self.max_retries + 1),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception_type(RateLimitError),
+            reraise=True
+        )
+        
         try:
             self.logger.info(
                 "generating_text",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 prompt_length=len(prompt),
-                system_prompt_length=len(system_prompt) if system_prompt else 0
+                system_prompt_length=len(system_prompt) if system_prompt else 0,
+                max_retries=self.max_retries
             )
             
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt or "",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                **kwargs
-            )
+            # Execute API call with retry strategy
+            for attempt in retry_strategy:
+                with attempt:
+                    response = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        system=system_prompt or "",
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ],
+                        **kwargs
+                    )
+                    
+                    if not response.content or len(response.content) == 0:
+                        raise ProviderError("Anthropic returned empty response")
+                    
+                    result = response.content[0].text
+                    if not result:
+                        raise ProviderError("Anthropic returned empty text")
+                    
+                    self.logger.info("text_generated", response_length=len(result))
+                    return result
             
-            if not response.content or len(response.content) == 0:
-                raise ProviderError("Anthropic returned empty response")
-            
-            result = response.content[0].text
-            if not result:
-                raise ProviderError("Anthropic returned empty text")
-            
-            self.logger.info("text_generated", response_length=len(result))
-            return result
-            
+        except ProviderError:
+            # Re-raise ProviderError without wrapping (e.g., from validation checks)
+            raise
         except RateLimitError as e:
             self.logger.error("rate_limit_exceeded", error=str(e))
             raise ProviderError(f"Anthropic rate limit exceeded: {e}") from e

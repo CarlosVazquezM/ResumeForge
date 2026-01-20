@@ -16,6 +16,11 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Constants
+MARKDOWN_JSON_PREFIX_LENGTH = 7  # Length of "```json"
+MARKDOWN_PREFIX_LENGTH = 3  # Length of "```"
+MARKDOWN_SUFFIX_LENGTH = 3  # Length of "```"
+
 
 class FactResumeParser:
     """Parses a Fact Resume into structured Evidence Cards."""
@@ -42,7 +47,7 @@ class FactResumeParser:
             Dictionary with cost estimation details
         """
         if not resume_path.exists():
-            raise FileNotFoundError(f"Fact resume file not found: {resume_path}")
+            raise ValidationError(f"Fact Resume Parser: Fact resume file not found: {resume_path}")
         
         resume_text = resume_path.read_text(encoding="utf-8")
         system_prompt = self._get_system_prompt()
@@ -85,7 +90,7 @@ class FactResumeParser:
             ProviderError: If LLM call fails
         """
         if not resume_path.exists():
-            raise FileNotFoundError(f"Fact resume file not found: {resume_path}")
+            raise ValidationError(f"Fact Resume Parser: Fact resume file not found: {resume_path}")
         
         # Read resume text
         self.logger.info("Reading fact resume", path=str(resume_path))
@@ -120,6 +125,9 @@ class FactResumeParser:
                 max_tokens=16384,  # Increased for comprehensive extraction (30-40+ cards)
                 **kwargs
             )
+        except ProviderError:
+            # Re-raise ProviderError without wrapping (preserves original error message)
+            raise
         except Exception as e:
             self.logger.error("Failed to call LLM for parsing", error=str(e))
             raise ProviderError(f"Failed to parse resume with LLM: {e}") from e
@@ -285,11 +293,11 @@ Respond with valid JSON matching the evidence card schema."""
         
         # Remove markdown code blocks if present
         if text.startswith("```json"):
-            text = text[7:]  # Remove ```json
+            text = text[MARKDOWN_JSON_PREFIX_LENGTH:]  # Remove ```json
         elif text.startswith("```"):
-            text = text[3:]  # Remove ```
+            text = text[MARKDOWN_PREFIX_LENGTH:]  # Remove ```
         
         if text.endswith("```"):
-            text = text[:-3]  # Remove closing ```
+            text = text[:-MARKDOWN_SUFFIX_LENGTH]  # Remove closing ```
         
         return text.strip()

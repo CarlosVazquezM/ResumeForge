@@ -1,0 +1,102 @@
+[
+  {
+    "id": "test-payscale-leadership",
+    "project": "Engineering Team Leadership",
+    "company": "PayScale",
+    "timeframe": "2023-2025",
+    "role": "Senior Manager, Software Engineering",
+    "scope": {
+      "team_size": 19,
+      "direct_reports": null,
+      "geography": ["US", "Romania"],
+      "budget": "$3M annual"
+    },
+    "metrics": [
+      {
+        "value": "19",
+        "description": "engineers managed",
+        "context": "across 3 Scrum teams"
+      },
+      {
+        "value": "95%",
+        "description": "budget adherence",
+        "context": "$3M annual budget"
+      }
+    ],
+    "skills": [
+      "Team Leadership",
+      "Budget Management",
+      "Global Team Management"
+    ],
+    "leadership_signals": [
+      "Led 19 engineers across 3 geographies",
+      "Managed $3M annual budget"
+    ],
+    "raw_text": "Led engineering organization of 19 engineers across 3 Scrum teams, managing $3M annual budget with 95% adherence."
+  },
+  {
+    "id": "test-payscale-cloud-migration",
+    "project": "Cloud Migration to Azure",
+    "company": "PayScale",
+    "timeframe": "2023-2024",
+    "role": "Senior Manager, Software Engineering",
+    "scope": {
+      "team_size": null,
+      "direct_reports": null,
+      "geography": [],
+      "budget": null
+    },
+    "metrics": [
+      {
+        "value": "30+",
+        "description": "servers migrated",
+        "context": "from on-premise to Azure"
+      },
+      {
+        "value": "2",
+        "description": "quarters",
+        "context": "time to complete migration"
+      }
+    ],
+    "skills": [
+      "Cloud Migration",
+      "Azure",
+      "Infrastructure Modernization"
+    ],
+    "leadership_signals": [
+      "Led modernization roadmap",
+      "Eliminated end-of-life system risks"
+    ],
+    "raw_text": "Led cloud migration of 30+ servers from on-premise to Azure over two quarters, eliminating end-of-life system risks."
+  },
+  {
+    "id": "test-payscale-quality-improvement",
+    "project": "Release Quality Improvement",
+    "company": "PayScale",
+    "timeframe": "2023-2025",
+    "role": "Senior Manager, Software Engineering",
+    "scope": {
+      "team_size": null,
+      "direct_reports": null,
+      "geography": [],
+      "budget": null
+    },
+    "metrics": [
+      {
+        "value": "75%",
+        "description": "reduction in release defects",
+        "context": "reduced customer-impacting issues from every release to once per quarter"
+      }
+    ],
+    "skills": [
+      "Process Improvement",
+      "Quality Assurance",
+      "Cross-functional Collaboration"
+    ],
+    "leadership_signals": [
+      "Instituted post-release retrospectives",
+      "Transformed engineering culture"
+    ],
+    "raw_text": "Drove 75% reduction in release defects by instituting post-release retrospectives and cross-functional pre-release coordination."
+  }
+]

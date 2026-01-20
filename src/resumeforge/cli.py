@@ -364,5 +364,32 @@ def generate(jd: Path, title: str, template: Path | None, max_pages: int, output
         raise click.Abort()
 
 
+@cli.command()
+@click.option("--variant1", "-v1", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to first resume variant (directory or file)")
+@click.option("--variant2", "-v2", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to second resume variant (directory or file)")
+def diff(variant1: Path, variant2: Path):
+    """Compare two resume variants and show differences."""
+    try:
+        from resumeforge.utils.diff import generate_diff
+        
+        click.echo("🔍 Comparing resume variants...")
+        click.echo(f"   Variant 1: {variant1}")
+        click.echo(f"   Variant 2: {variant2}")
+        click.echo()
+        
+        diff_text = generate_diff(variant1, variant2)
+        click.echo(diff_text)
+        
+    except FileNotFoundError as e:
+        click.echo(f"❌ File not found: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"❌ Error generating diff: {e}", err=True)
+        logger.exception("Error in diff command")
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     cli()

@@ -10,6 +10,18 @@ from resumeforge.schemas.evidence_card import EvidenceCard
 # Path to fixtures directory
 FIXTURES_DIR = Path(__file__).parent
 
+# Import output verification helper
+from tests.fixtures.output_verification import OutputVerifier
+
+__all__ = [
+    "load_sample_evidence_cards",
+    "load_sample_jd",
+    "load_sample_template",
+    "create_mock_provider",
+    "create_sample_blackboard",
+    "OutputVerifier",
+]
+
 
 def load_sample_evidence_cards() -> list[EvidenceCard]:
     """Load sample evidence cards from fixture file."""

@@ -171,6 +171,7 @@ class PipelineOrchestrator:
 
         if state == PipelineState.COMPLETE:
             self.logger.info("Pipeline completed successfully")
+            blackboard.current_step = "complete"
             self._save_outputs(blackboard)
         elif state == PipelineState.FAILED:
             self.logger.error("Pipeline failed", final_step=blackboard.current_step)
@@ -516,8 +517,25 @@ class PipelineOrchestrator:
                     error_type=type(e).__name__,
                 )
 
-        # Generate diff (if base resume exists)
-        # TODO: Implement diff generation when base resume template exists
+        # Generate diff (if base resume template exists)
+        if blackboard.resume_draft and blackboard.inputs.template_path:
+            template_path = Path(blackboard.inputs.template_path)
+            if template_path.exists():
+                try:
+                    from resumeforge.utils.diff import generate_diff
+                    
+                    resume_md_path = output_dir / "resume.md"
+                    if resume_md_path.exists():
+                        diff_text = generate_diff(resume_md_path, template_path)
+                        diff_path = output_dir / "diff_from_base.md"
+                        diff_path.write_text(diff_text, encoding="utf-8")
+                        self.logger.info("Diff generated", path=str(diff_path))
+                except Exception as e:
+                    self.logger.warning(
+                        "Failed to generate diff",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
 
         self.logger.info("All outputs saved", output_dir=str(output_dir))
 

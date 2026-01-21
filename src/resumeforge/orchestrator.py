@@ -1,6 +1,7 @@
 """Pipeline orchestrator for ResumeForge."""
 
 import json
+import shutil
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -11,7 +12,7 @@ import structlog
 from resumeforge.exceptions import OrchestrationError
 from resumeforge.schemas.blackboard import Blackboard
 from resumeforge.schemas.evidence_card import EvidenceCard
-from resumeforge.utils.cache import load_evidence_cards_cached
+from resumeforge.utils.cache import get_llm_cache, load_evidence_cards_cached
 from resumeforge.utils.metrics import PerformanceMetrics, timed_operation
 
 if TYPE_CHECKING:
@@ -95,25 +96,152 @@ TRANSITIONS = [
 class PipelineOrchestrator:
     """Orchestrates the multi-agent resume generation pipeline."""
 
-    def __init__(self, config: "Config", agents: dict[str, "BaseAgent"]):
+    def __init__(self, config: "Config", agents: dict[str, "BaseAgent"], disable_cache: bool = False):
         """
         Initialize orchestrator with configuration and agents.
         
         Args:
             config: Configuration object (from load_config)
             agents: Dictionary mapping agent names to agent instances
+            disable_cache: If True, disable LLM result caching (for --no-cache flag)
         """
         self.config = config
         self.agents = agents
+        self.disable_cache = disable_cache
         self.logger = logger.bind(orchestrator="PipelineOrchestrator")
         self.metrics = PerformanceMetrics()
+        self._current_blackboard: Blackboard | None = None  # Store current blackboard for error handling
+        self._audit_failure_handler: callable | None = None  # Callback for handling audit failures interactively
 
-    def run(self, blackboard: Blackboard) -> Blackboard:
+    def _save_checkpoint(self, blackboard: Blackboard, state: PipelineState) -> Path:
+        """
+        Save checkpoint after successful state execution.
+        
+        Args:
+            blackboard: Current blackboard state
+            state: Current pipeline state
+            
+        Returns:
+            Path to saved checkpoint file
+        """
+        # Create checkpoints directory
+        output_base_dir = Path(self.config.paths.get("outputs", "./outputs"))
+        checkpoints_dir = output_base_dir / ".checkpoints"
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create checkpoint filename with state and timestamp
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_title = "".join(
+            c if c.isalnum() or c in ("-", "_") else "-"
+            for c in blackboard.inputs.target_title.lower()
+        )[:50]
+        safe_title = safe_title.replace(" ", "-")
+        
+        checkpoint_file = checkpoints_dir / f"{safe_title}-{state.name.lower()}-{timestamp}.json"
+        
+        # Add checkpoint metadata to blackboard
+        checkpoint_data = blackboard.model_dump(mode="json")
+        checkpoint_data["_checkpoint_metadata"] = {
+            "timestamp": timestamp,
+            "state": state.name,
+            "step": blackboard.current_step,
+        }
+        
+        # Save full blackboard state
+        with open(checkpoint_file, "w") as f:
+            json.dump(checkpoint_data, f, indent=2, default=str)
+        
+        self.logger.info("Checkpoint saved", checkpoint=str(checkpoint_file), state=state.name)
+        
+        # Also save/update a "latest" checkpoint for easy resume
+        latest_checkpoint = checkpoints_dir / f"{safe_title}-latest.json"
+        # Copy file instead of rename/link for cross-platform compatibility
+        shutil.copy2(checkpoint_file, latest_checkpoint)
+        
+        return checkpoint_file
+
+    def _load_checkpoint(self, checkpoint_path: Path) -> Blackboard:
+        """
+        Load blackboard from checkpoint file.
+        
+        Args:
+            checkpoint_path: Path to checkpoint JSON file
+            
+        Returns:
+            Restored Blackboard instance
+            
+        Raises:
+            OrchestrationError: If checkpoint is invalid or cannot be loaded
+        """
+        try:
+            with open(checkpoint_path, "r") as f:
+                data = json.load(f)
+            
+            # Remove checkpoint metadata before validation
+            checkpoint_metadata = data.pop("_checkpoint_metadata", {})
+            
+            blackboard = Blackboard.model_validate(data)
+            
+            self.logger.info(
+                "Checkpoint loaded",
+                checkpoint=str(checkpoint_path),
+                state=checkpoint_metadata.get("state", "unknown"),
+                step=blackboard.current_step,
+            )
+            
+            return blackboard
+        except Exception as e:
+            raise OrchestrationError(f"Failed to load checkpoint: {e}") from e
+
+    def _find_latest_checkpoint(self, title: str) -> Path | None:
+        """
+        Find the latest checkpoint for a given job title.
+        
+        Args:
+            title: Job title to search for
+            
+        Returns:
+            Path to latest checkpoint if found, None otherwise
+        """
+        output_base_dir = Path(self.config.paths.get("outputs", "./outputs"))
+        checkpoints_dir = output_base_dir / ".checkpoints"
+        
+        if not checkpoints_dir.exists():
+            return None
+        
+        safe_title = "".join(
+            c if c.isalnum() or c in ("-", "_") else "-"
+            for c in title.lower()
+        )[:50].replace(" ", "-")
+        
+        latest_checkpoint = checkpoints_dir / f"{safe_title}-latest.json"
+        
+        if latest_checkpoint.exists():
+            return latest_checkpoint
+        
+        return None
+
+    def run(
+        self, 
+        blackboard: Blackboard, 
+        resume_from: Path | None = None, 
+        job_description_override: str | None = None,
+        audit_failure_handler: callable | None = None
+    ) -> Blackboard:
         """
         Execute the full pipeline using state machine.
         
         Args:
-            blackboard: Initial blackboard state
+            blackboard: Initial blackboard state (or ignored if resume_from is provided)
+            resume_from: Optional path to checkpoint file to resume from
+            job_description_override: Optional job description to use when resuming from checkpoint.
+                                     If provided and resuming, replaces the checkpoint's job description.
+            audit_failure_handler: Optional callback function to handle audit failures interactively.
+                                  Should accept (blackboard: Blackboard) and return:
+                                  - "proceed": Mark audit as passed and continue to COMPLETE
+                                  - "add_evidence": Add evidence and return to EVIDENCE_MAPPING
+                                  - "cancel": Fail the pipeline
+                                  - Or return a dict with "action" and optionally "evidence_text" for add_evidence
             
         Returns:
             Updated blackboard with pipeline results
@@ -121,8 +249,87 @@ class PipelineOrchestrator:
         Raises:
             OrchestrationError: If pipeline fails or invalid state transition
         """
+        # Store audit failure handler for use in _get_next_state
+        self._audit_failure_handler = audit_failure_handler
+        # If resuming, load checkpoint
+        if resume_from:
+            self.logger.info("Resuming from checkpoint", checkpoint=str(resume_from))
+            blackboard = self._load_checkpoint(resume_from)
+            
+            # If job description override is provided, update the loaded blackboard
+            if job_description_override:
+                old_jd_preview = blackboard.inputs.job_description[:100] + "..." if len(blackboard.inputs.job_description) > 100 else blackboard.inputs.job_description
+                new_jd_preview = job_description_override[:100] + "..." if len(job_description_override) > 100 else job_description_override
+                self.logger.warning(
+                    "Job description override provided when resuming",
+                    old_preview=old_jd_preview,
+                    new_preview=new_jd_preview
+                )
+                blackboard.inputs.job_description = job_description_override
+                # If we're updating the job description, we should restart from JD analysis
+                # since the analysis results may no longer be valid
+                if blackboard.current_step not in ("init", "preprocessing", "jd_analysis"):
+                    self.logger.warning(
+                        "Job description changed - resetting to JD analysis step",
+                        previous_step=blackboard.current_step
+                    )
+                    blackboard.current_step = "jd_analysis"
+                    # Clear JD analysis outputs since they're now invalid
+                    blackboard.role_profile = None
+                    blackboard.requirements = []
+                    # Also clear downstream outputs that depend on JD analysis
+                    blackboard.evidence_map = []
+                    blackboard.gap_resolutions = []
+                    blackboard.selected_evidence_ids = []
+                    blackboard.resume_draft = None
+                    blackboard.claim_index = []
+                    blackboard.ats_report = None
+                    blackboard.audit_report = None
+            
+            # Determine current state from blackboard.current_step
+            try:
+                state = PipelineState[blackboard.current_step.upper()]
+            except KeyError:
+                # Map string step names to PipelineState enum
+                # Includes backward compatibility for old checkpoint step names with "_complete" suffix
+                step_to_state = {
+                    # Current step names (without _complete suffix)
+                    "init": PipelineState.INIT,
+                    "preprocessing": PipelineState.PREPROCESSING,
+                    "jd_analysis": PipelineState.JD_ANALYSIS,
+                    "evidence_mapping": PipelineState.EVIDENCE_MAPPING,
+                    "writing": PipelineState.WRITING,
+                    "auditing": PipelineState.AUDITING,
+                    "revision": PipelineState.REVISION,
+                    # Backward compatibility: old checkpoint step names with _complete suffix
+                    # These map to the state that was completed (checkpoint was saved after completion)
+                    "jd_analysis_complete": PipelineState.JD_ANALYSIS,
+                    "evidence_mapping_complete": PipelineState.EVIDENCE_MAPPING,
+                    "writing_complete": PipelineState.WRITING,
+                    "auditing_complete": PipelineState.AUDITING,
+                }
+                state = step_to_state.get(blackboard.current_step.lower(), PipelineState.INIT)
+                if state == PipelineState.INIT and blackboard.current_step.lower() not in ("init", "preprocessing"):
+                    # Log warning if we couldn't map the step (except for init/preprocessing)
+                    self.logger.warning(
+                        "Could not map checkpoint step to state, defaulting to INIT",
+                        step=blackboard.current_step
+                    )
+                else:
+                    self.logger.info("Mapped step to state", step=blackboard.current_step, state=state.name)
+        else:
+            state = PipelineState.INIT
+        
+        # Initialize and attach cache to blackboard
+        # Convert config to dict for cache initialization
+        config_dict = self.config.model_dump() if hasattr(self.config, "model_dump") else {}
+        cache = get_llm_cache(config_dict, disable_cache=self.disable_cache)
+        blackboard.__dict__["_llm_cache"] = cache
+        
+        # Store blackboard for error handling access
+        self._current_blackboard = blackboard
+        
         self.metrics.start_pipeline()
-        state = PipelineState.INIT
         self.logger.info("Pipeline started", initial_state=state.name)
 
         while state not in (PipelineState.COMPLETE, PipelineState.FAILED):
@@ -137,6 +344,9 @@ class PipelineOrchestrator:
             try:
                 # Execute current state's action
                 blackboard = self._execute_state(state, blackboard)
+                
+                # Update stored blackboard
+                self._current_blackboard = blackboard
 
                 # Validate state before transitioning
                 is_valid, errors = blackboard.validate_state()
@@ -149,6 +359,10 @@ class PipelineOrchestrator:
                     state = PipelineState.FAILED
                     blackboard.current_step = "failed"
                     break
+
+                # Save checkpoint after successful state execution (except INIT and COMPLETE)
+                if state not in (PipelineState.INIT, PipelineState.COMPLETE):
+                    self._save_checkpoint(blackboard, state)
 
                 # Find valid transition
                 next_state = self._get_next_state(state, blackboard)
@@ -169,8 +383,17 @@ class PipelineOrchestrator:
                     state=state.name,
                     error=str(e),
                 )
+                # Save checkpoint even on failure (so user can resume)
+                if state != PipelineState.INIT:
+                    try:
+                        self._save_checkpoint(blackboard, state)
+                    except Exception as checkpoint_error:
+                        self.logger.warning("Failed to save checkpoint on error", error=str(checkpoint_error))
+                
                 state = PipelineState.FAILED
                 blackboard.current_step = "failed"
+                # Update stored blackboard with failure state
+                self._current_blackboard = blackboard
                 break
 
         if state == PipelineState.COMPLETE:
@@ -179,10 +402,21 @@ class PipelineOrchestrator:
             blackboard.current_step = "complete"
             self.metrics.log_summary()
             self._save_outputs(blackboard)
+            # Clean up latest checkpoint on successful completion
+            try:
+                latest = self._find_latest_checkpoint(blackboard.inputs.target_title)
+                if latest and latest.exists():
+                    latest.unlink()
+            except Exception:
+                pass  # Ignore cleanup errors
+            # Update stored blackboard with completion state
+            self._current_blackboard = blackboard
         elif state == PipelineState.FAILED:
             self.metrics.end_pipeline()
             self.logger.error("Pipeline failed", final_step=blackboard.current_step)
             self.metrics.log_summary()
+            # Ensure stored blackboard is up to date before raising
+            self._current_blackboard = blackboard
             raise OrchestrationError(
                 f"Pipeline failed at step: {blackboard.current_step}"
             )
@@ -302,12 +536,114 @@ class PipelineOrchestrator:
         Returns:
             Next valid state, or None if no valid transition
         """
+        # Special handling for audit failures with interactive handler
+        if (current == PipelineState.AUDITING and 
+            blackboard.audit_report is not None and 
+            not blackboard.audit_report.passed and
+            self._audit_failure_handler is not None):
+            # Call the interactive handler
+            decision = self._audit_failure_handler(blackboard)
+            
+            # Handle the decision
+            if isinstance(decision, dict):
+                action = decision.get("action", "cancel")
+            else:
+                action = decision
+            
+            if action == "proceed":
+                # Mark audit as passed and continue to COMPLETE
+                blackboard.audit_report.passed = True
+                self.logger.info("User approved proceeding despite audit violations")
+                return PipelineState.COMPLETE
+            elif action == "add_evidence":
+                # Add evidence and return to EVIDENCE_MAPPING to re-run pipeline
+                evidence_text = decision.get("evidence_text", "") if isinstance(decision, dict) else ""
+                if evidence_text:
+                    self._add_user_evidence(blackboard, evidence_text)
+                    # Reset to evidence mapping to re-run with new evidence
+                    blackboard.current_step = "evidence_mapping"
+                    # Clear downstream outputs
+                    blackboard.evidence_map = []
+                    blackboard.gap_resolutions = []
+                    blackboard.selected_evidence_ids = []
+                    blackboard.resume_draft = None
+                    blackboard.claim_index = []
+                    blackboard.ats_report = None
+                    blackboard.audit_report = None
+                    self.logger.info("User added evidence, returning to evidence mapping to re-run")
+                    return PipelineState.EVIDENCE_MAPPING
+                else:
+                    self.logger.warning("add_evidence action but no evidence_text provided, failing")
+                    return PipelineState.FAILED
+            elif action == "add_evidence_and_proceed":
+                # Add evidence but don't re-run, just proceed to COMPLETE
+                evidence_text = decision.get("evidence_text", "") if isinstance(decision, dict) else ""
+                if evidence_text:
+                    self._add_user_evidence(blackboard, evidence_text)
+                    # Mark audit as passed and continue to COMPLETE (don't re-run)
+                    blackboard.audit_report.passed = True
+                    self.logger.info("User added evidence and chose to proceed without re-running")
+                    return PipelineState.COMPLETE
+                else:
+                    self.logger.warning("add_evidence_and_proceed action but no evidence_text provided, failing")
+                    return PipelineState.FAILED
+            else:  # cancel or unknown
+                self.logger.info("User chose to cancel after audit violations")
+                return PipelineState.FAILED
+        
+        # Normal transition logic
         for transition in TRANSITIONS:
             if transition.from_state == current:
                 if transition.condition(blackboard):
                     return transition.to_state
 
         return None
+
+    def _add_user_evidence(self, blackboard: Blackboard, evidence_text: str) -> None:
+        """
+        Add a new evidence card from user-provided text.
+        
+        Args:
+            blackboard: Current blackboard state
+            evidence_text: User-provided evidence text/fact
+        """
+        # Generate a unique ID for the new evidence card
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        card_id = f"user-added-{timestamp}"
+        
+        # Try to extract company and role from existing cards or use defaults
+        company = "Unknown"
+        role = blackboard.inputs.target_title
+        # Use current year as default timeframe (YYYY-YYYY format)
+        current_year = datetime.now().strftime("%Y")
+        timeframe = f"{current_year}-{current_year}"
+        
+        # Use the most recent evidence card as a template for company/role if available
+        if blackboard.evidence_cards:
+            latest_card = blackboard.evidence_cards[-1]
+            company = latest_card.company
+            role = latest_card.role
+            # Use the same timeframe as the latest card
+            timeframe = latest_card.timeframe
+        
+        # Create a minimal evidence card from user input
+        new_card = EvidenceCard(
+            id=card_id,
+            project="User Added Evidence",
+            company=company,
+            timeframe=timeframe,
+            role=role,
+            raw_text=evidence_text.strip(),
+            # Leave other fields empty - they can be filled in later if needed
+        )
+        
+        # Add to evidence cards
+        blackboard.evidence_cards.append(new_card)
+        self.logger.info(
+            "Added user-provided evidence card",
+            card_id=card_id,
+            evidence_preview=evidence_text[:100] + "..." if len(evidence_text) > 100 else evidence_text
+        )
 
     def _preprocess(self, blackboard: Blackboard) -> Blackboard:
         """

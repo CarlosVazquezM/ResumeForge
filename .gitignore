@@ -206,3 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 data/evidence_cards.json
+outputs/
+data/Carlos_Vazquez_Master_Fact_Resume.md
+data/Follett_Sr_Manager_Software_Engineering_JD_4316780981.txt
+data/evidence_cards_20260120.json

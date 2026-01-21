@@ -20,6 +20,88 @@ if TYPE_CHECKING:
 class EvidenceMapperAgent(BaseAgent):
     """Maps job requirements to evidence cards and identifies gaps."""
     
+    def get_cache_key_inputs(self, blackboard: Blackboard) -> tuple | None:
+        """Get cache key inputs: role profile, requirements, evidence card IDs, and synonyms."""
+        if not blackboard.role_profile or not blackboard.requirements or not blackboard.evidence_cards:
+            return None
+        
+        # Include role profile key fields
+        role_profile_key = (
+            blackboard.role_profile.inferred_level,
+            tuple(sorted(blackboard.role_profile.must_haves)),
+            tuple(sorted(blackboard.role_profile.nice_to_haves)),
+        )
+        
+        # Include requirement IDs and text (sorted for consistency)
+        requirements_key = tuple(
+            (req.id, req.text) for req in sorted(blackboard.requirements, key=lambda r: r.id)
+        )
+        
+        # Include evidence card IDs (sorted)
+        evidence_card_ids = tuple(sorted(card.id for card in blackboard.evidence_cards))
+        
+        # Include synonyms map (sorted for consistency)
+        synonyms_key = tuple(
+            (k, tuple(sorted(v))) for k, v in sorted(blackboard.synonyms_map.items())
+        ) if blackboard.synonyms_map else ()
+        
+        return (role_profile_key, requirements_key, evidence_card_ids, synonyms_key)
+    
+    def restore_from_cache(self, blackboard: Blackboard, cached_result: dict) -> Blackboard | None:
+        """Restore blackboard from cached evidence mapping."""
+        try:
+            # Restore evidence map
+            if "evidence_map" in cached_result:
+                evidence_mappings = [
+                    EvidenceMapping(**m) for m in cached_result["evidence_map"]
+                ]
+                blackboard.evidence_map = evidence_mappings
+            
+            # Restore gap resolutions
+            if "gap_resolutions" in cached_result:
+                gap_resolutions = []
+                for gap_data in cached_result["gap_resolutions"]:
+                    # Convert strategy string to enum if needed
+                    if "strategy" in gap_data and isinstance(gap_data["strategy"], str):
+                        strategy_str = gap_data["strategy"]
+                        if strategy_str == "adjacent_experience":
+                            gap_data["strategy"] = GapStrategy.ADJACENT
+                        elif strategy_str == "ask_user":
+                            gap_data["strategy"] = GapStrategy.ASK_USER
+                        else:
+                            gap_data["strategy"] = GapStrategy.OMIT
+                    gap_resolutions.append(GapResolution(**gap_data))
+                blackboard.gap_resolutions = gap_resolutions
+            
+            # Restore selected evidence IDs
+            if "selected_evidence_ids" in cached_result:
+                blackboard.selected_evidence_ids = cached_result["selected_evidence_ids"]
+            
+            blackboard.current_step = "evidence_mapping"
+            
+            self.logger.info(
+                "Evidence mapping restored from cache",
+                evidence_mappings_count=len(blackboard.evidence_map),
+                gaps_count=len(blackboard.gap_resolutions),
+                selected_evidence_count=len(blackboard.selected_evidence_ids)
+            )
+            
+            return blackboard
+        except Exception as e:
+            self.logger.warning("Failed to restore from cache, falling back to LLM", error=str(e))
+            return None
+    
+    def extract_cache_result(self, blackboard: Blackboard) -> dict | None:
+        """Extract evidence mapping result for caching."""
+        if not blackboard.evidence_map and not blackboard.gap_resolutions:
+            return None
+        
+        return {
+            "evidence_map": [m.model_dump() for m in blackboard.evidence_map],
+            "gap_resolutions": [g.model_dump() for g in blackboard.gap_resolutions],
+            "selected_evidence_ids": blackboard.selected_evidence_ids
+        }
+    
     def get_system_prompt(self) -> str:
         """Return the system prompt for evidence mapping."""
         return """You are a precise evidence-matching system. Your task is to map job requirements to verified evidence from the candidate's history.
@@ -168,9 +250,10 @@ Respond with JSON:
         json_text = self._extract_json(response)
         
         try:
-            data = json.loads(json_text)
-        except json.JSONDecodeError as e:
-            raise ValidationError(f"Invalid JSON response from Evidence Mapper: {e}") from e
+            data = self._parse_json_with_repair(json_text, context="Evidence Mapper")
+        except ValidationError:
+            # Re-raise ValidationError as-is (already has good error message)
+            raise
         
         # Validate structure
         if "evidence_map" not in data:
@@ -304,7 +387,7 @@ Respond with JSON:
         blackboard.evidence_map = evidence_mappings
         blackboard.gap_resolutions = gap_resolutions
         blackboard.selected_evidence_ids = selected_evidence_ids
-        blackboard.current_step = "evidence_mapping_complete"
+        blackboard.current_step = "evidence_mapping"
         
         self.logger.info(
             "Evidence mapping complete",

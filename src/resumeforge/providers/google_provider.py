@@ -1,5 +1,6 @@
 """Google AI provider implementation."""
 
+import re
 from tenacity import (
     Retrying,
     stop_after_attempt,
@@ -16,7 +17,7 @@ from resumeforge.providers.base import BaseProvider, DEFAULT_TIMEOUT_SECONDS, DE
 class GoogleProvider(BaseProvider):
     """Google AI provider using Gemini models."""
     
-    def __init__(self, api_key: str, model: str = "gemini-1.5-flash", timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, max_retries: int = DEFAULT_MAX_RETRIES):
+    def __init__(self, api_key: str, model: str = "gemini-1.5-flash-latest", timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, max_retries: int = DEFAULT_MAX_RETRIES):
         """
         Initialize Google AI provider.
         
@@ -103,15 +104,29 @@ class GoogleProvider(BaseProvider):
             raise
         except Exception as e:
             error_type = type(e).__name__
-            self.logger.error("api_error", error=str(e), error_type=error_type)
+            error_str = str(e)
+            self.logger.error("api_error", error=error_str, error_type=error_type)
             
             # Check for specific error types
-            if "429" in str(e) or "rate" in str(e).lower():
-                raise ProviderError(f"Google AI rate limit exceeded: {e}") from e
-            elif "timeout" in str(e).lower():
-                raise ProviderError(f"Google AI request timeout: {e}") from e
+            # Check for 404/model not found errors first
+            if "404" in error_str or "NOT_FOUND" in error_str or "not found" in error_str.lower():
+                # Extract model name from error if possible
+                model_hint = ""
+                if "models/" in error_str:
+                    # Try to extract model name from error message
+                    match = re.search(r"models/([^\s]+)", error_str)
+                    if match:
+                        model_hint = f" (model: {match.group(1)})"
+                raise ProviderError(
+                    f"Google AI model not found{model_hint}: {error_str}. "
+                    f"Check that the model name '{self.model}' is correct and available for your API version."
+                ) from e
+            elif "429" in error_str or ("rate" in error_str.lower() and "limit" in error_str.lower()):
+                raise ProviderError(f"Google AI rate limit exceeded: {error_str}") from e
+            elif "timeout" in error_str.lower():
+                raise ProviderError(f"Google AI request timeout: {error_str}") from e
             else:
-                raise ProviderError(f"Google AI API error: {e}") from e
+                raise ProviderError(f"Google AI API error: {error_str}") from e
     
     def count_tokens(self, text: str) -> int:
         """

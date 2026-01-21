@@ -41,7 +41,7 @@ models:
   # ATS Scorer - Gemini Flash for fast/cheap pattern matching (ADR-004, SDD Section 11)
   ats_scorer_fast:
     provider: google
-    model: gemini-1.5-flash
+    model: gemini-2.5-flash
   
   # Fallback - Fast alternatives if primary provider fails
   fallback_fast:
@@ -108,6 +108,24 @@ fallback_model_alias_overrides:
   anthropic: writer_default  # If OpenAI fails, use Anthropic with writer config
   google: mapper_precise      # If Anthropic fails, use Google with mapper config
   groq: fallback_fast         # Fast fallback
+
+# Cache configuration for LLM result caching
+# Reduces redundant LLM calls by caching agent outputs based on input hashes
+cache:
+  # Backend type: "file" (default, local files) or "redis" (distributed)
+  backend: file
+  
+  # File cache settings (when backend=file)
+  file_dir: ./outputs/.cache
+  
+  # Redis cache settings (when backend=redis)
+  # Uncomment and configure if using Redis backend
+  # redis:
+  #   host: localhost
+  #   port: 6379
+  #   db: 0
+  #   password: null  # Optional Redis password
+  #   key_prefix: resumeforge:cache:
 
 logging:
   level: INFO

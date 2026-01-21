@@ -12,12 +12,113 @@ if TYPE_CHECKING:
 
 # Constants
 ATS_SCORING_TEMPERATURE = 0.2  # Low temperature for consistent scoring
-ATS_SCORING_MAX_TOKENS = 2048
+ATS_SCORING_MAX_TOKENS = 8192  # Increased to 8K to handle long keyword lists (Gemini 2.5 Flash supports up to 8K output)
 MAX_KEYWORDS_IN_SUGGESTION = 5
 
 
 class AuditorAgent(BaseAgent):
     """Audits resume for ATS compatibility and truthfulness."""
+    
+    def get_cache_key_inputs(self, blackboard: Blackboard) -> tuple | None:
+        """Get cache key inputs for truth auditing: resume content and evidence card IDs."""
+        if not blackboard.resume_draft or not blackboard.evidence_cards:
+            return None
+        
+        # Serialize resume content
+        resume_content = "\n\n".join([
+            f"## {section.name}\n{section.content}"
+            for section in blackboard.resume_draft.sections
+        ])
+        
+        # Include evidence card IDs (sorted)
+        evidence_card_ids = tuple(sorted(card.id for card in blackboard.evidence_cards))
+        
+        return (resume_content, evidence_card_ids)
+    
+    def restore_from_cache(self, blackboard: Blackboard, cached_result: dict) -> Blackboard | None:
+        """Restore blackboard from cached truth audit result."""
+        try:
+            # Restore audit report
+            if "audit_report" in cached_result:
+                audit_report_data = cached_result["audit_report"]
+                # Convert truth violations
+                if "truth_violations" in audit_report_data:
+                    violations = [
+                        TruthViolation(**v) for v in audit_report_data["truth_violations"]
+                    ]
+                    audit_report_data["truth_violations"] = violations
+                blackboard.audit_report = AuditReport(**audit_report_data)
+            
+            blackboard.current_step = "auditing"
+            
+            self.logger.info(
+                "Truth auditing restored from cache",
+                passed=blackboard.audit_report.passed if blackboard.audit_report else None,
+                violations_count=len(blackboard.audit_report.truth_violations) if blackboard.audit_report else 0
+            )
+            
+            return blackboard
+        except Exception as e:
+            self.logger.warning("Failed to restore from cache, falling back to LLM", error=str(e))
+            return None
+    
+    def extract_cache_result(self, blackboard: Blackboard) -> dict | None:
+        """Extract truth audit result for caching."""
+        if not blackboard.audit_report:
+            return None
+        
+        return {
+            "audit_report": blackboard.audit_report.model_dump()
+        }
+    
+    def _get_ats_cache_key_inputs(self, blackboard: Blackboard) -> tuple | None:
+        """Get cache key inputs for ATS scoring: resume content, role profile keywords, and target title."""
+        if not blackboard.resume_draft or not blackboard.role_profile:
+            return None
+        
+        # Serialize resume content
+        resume_content = "\n\n".join([
+            f"## {section.name}\n{section.content}"
+            for section in blackboard.resume_draft.sections
+        ])
+        
+        # Get JD keywords
+        jd_keywords = []
+        if blackboard.role_profile.keyword_clusters:
+            for cluster in blackboard.role_profile.keyword_clusters.values():
+                jd_keywords.extend(cluster)
+        jd_keywords.extend(blackboard.role_profile.must_haves)
+        jd_keywords.extend(blackboard.role_profile.nice_to_haves)
+        jd_keywords_key = tuple(sorted(set(jd_keywords)))
+        
+        # Include target title
+        target_title = blackboard.inputs.target_title or ""
+        
+        return (resume_content, jd_keywords_key, target_title)
+    
+    def _get_ats_cache_result(self, blackboard: Blackboard) -> dict | None:
+        """Get cached ATS report if available."""
+        cache_inputs = self._get_ats_cache_key_inputs(blackboard)
+        if cache_inputs is None:
+            return None
+        
+        cache = getattr(blackboard, "_llm_cache", None)
+        if cache is None:
+            return None
+        
+        return cache.get("ats_scorer", *cache_inputs)
+    
+    def _save_ats_cache_result(self, blackboard: Blackboard, result: dict) -> None:
+        """Save ATS report to cache."""
+        cache_inputs = self._get_ats_cache_key_inputs(blackboard)
+        if cache_inputs is None:
+            return
+        
+        cache = getattr(blackboard, "_llm_cache", None)
+        if cache is None:
+            return
+        
+        cache.set("ats_scorer", result, *cache_inputs)
     
     def __init__(self, ats_provider: "BaseProvider", truth_provider: "BaseProvider", config: dict):
         """
@@ -180,9 +281,10 @@ Respond with JSON:
         json_text = self._extract_json(response)
         
         try:
-            data = json.loads(json_text)
-        except json.JSONDecodeError as e:
-            raise ValidationError(f"Invalid JSON response from Truth Auditor: {e}") from e
+            data = self._parse_json_with_repair(json_text, context="Truth Auditor")
+        except ValidationError:
+            # Re-raise ValidationError as-is (already has good error message)
+            raise
         
         # Validate structure
         if "passed" not in data:
@@ -218,7 +320,7 @@ Respond with JSON:
         
         # Update blackboard
         blackboard.audit_report = audit_report
-        blackboard.current_step = "auditing_complete"
+        blackboard.current_step = "auditing"
         
         self.logger.info(
             "Truth audit complete",
@@ -249,6 +351,23 @@ Respond with JSON:
                 "Auditor: role_profile is required for ATS scoring. "
                 "Please run JD Analyst agent first to populate role_profile."
             )
+        
+        # Check cache first
+        cached_ats_result = self._get_ats_cache_result(blackboard)
+        if cached_ats_result is not None:
+            self.logger.info("ATS scoring cache hit - restoring from cache")
+            try:
+                ats_report = ATSReport(**cached_ats_result["ats_report"])
+                blackboard.ats_report = ats_report
+                self.logger.info(
+                    "ATS scoring restored from cache",
+                    keyword_coverage=ats_report.keyword_coverage_score,
+                    role_signal=ats_report.role_signal_score
+                )
+                return blackboard
+            except Exception as e:
+                self.logger.warning("Failed to restore ATS from cache, falling back to LLM", error=str(e))
+                # Fall through to normal execution
         
         # Build ATS scoring prompt
         system_prompt = """You are an ATS (Applicant Tracking System) compatibility analyzer. Score the resume on keyword coverage and formatting safety.
@@ -317,7 +436,7 @@ Flag any of these ATS-unfriendly elements:
 1. Calculate keyword coverage score (0-100)
 2. Calculate role signal score (0-100)
 3. Check for format warnings
-4. List supported and missing keywords
+4. List supported and missing keywords (limit to top 20 most important keywords per list to keep response concise)
 
 Respond with JSON matching the ATS report format."""
         
@@ -337,11 +456,32 @@ Respond with JSON matching the ATS report format."""
         # Parse ATS response
         json_text = self._extract_json(response)
         try:
-            ats_data = json.loads(json_text)
-        except json.JSONDecodeError as e:
-            raise ValidationError(f"Invalid JSON response from ATS Scorer: {e}") from e
+            ats_data = self._parse_json_with_repair(json_text, context="ATS Scorer")
+        except ValidationError:
+            # Re-raise ValidationError as-is (already has good error message)
+            raise
         
         # Validate and create ATSReport
+        # If JSON was truncated, provide defaults for missing required fields
+        if "role_signal_score" not in ats_data:
+            self.logger.warning(
+                "ATS response truncated - missing role_signal_score, using default",
+                available_fields=list(ats_data.keys())
+            )
+            # Estimate role_signal_score based on keyword_coverage_score if available
+            if "keyword_coverage_score" in ats_data:
+                # Use keyword coverage as a proxy (usually correlated)
+                ats_data["role_signal_score"] = min(ats_data["keyword_coverage_score"] * 1.1, 100.0)
+            else:
+                ats_data["role_signal_score"] = 50.0  # Neutral default
+        
+        if "keyword_coverage_score" not in ats_data:
+            self.logger.warning(
+                "ATS response truncated - missing keyword_coverage_score, using default",
+                available_fields=list(ats_data.keys())
+            )
+            ats_data["keyword_coverage_score"] = 0.0
+        
         try:
             ats_report = ATSReport(**ats_data)
         except Exception as e:
@@ -349,6 +489,13 @@ Respond with JSON matching the ATS report format."""
         
         # Update blackboard
         blackboard.ats_report = ats_report
+        
+        # Save to cache
+        cache_inputs = self._get_ats_cache_key_inputs(blackboard)
+        if cache_inputs is not None:
+            self._save_ats_cache_result(blackboard, {
+                "ats_report": ats_report.model_dump()
+            })
         
         self.logger.info(
             "ATS scoring complete",

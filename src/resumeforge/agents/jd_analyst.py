@@ -14,6 +14,66 @@ if TYPE_CHECKING:
 class JDAnalystAgent(BaseAgent):
     """Analyzes job descriptions and produces strategic guidance."""
     
+    def get_cache_key_inputs(self, blackboard: Blackboard) -> tuple | None:
+        """Get cache key inputs: job description and target title."""
+        return (
+            blackboard.inputs.job_description,
+            blackboard.inputs.target_title
+        )
+    
+    def restore_from_cache(self, blackboard: Blackboard, cached_result: dict) -> Blackboard | None:
+        """Restore blackboard from cached JD analysis."""
+        try:
+            # Restore role profile
+            if "role_profile" in cached_result:
+                blackboard.role_profile = RoleProfile(**cached_result["role_profile"])
+            
+            # Restore requirements
+            if "requirements" in cached_result:
+                requirements = []
+                for req_data in cached_result["requirements"]:
+                    # Convert priority string to Priority enum
+                    if "priority" in req_data:
+                        priority_str = req_data["priority"]
+                        if isinstance(priority_str, str):
+                            priority_str = priority_str.lower()
+                            if priority_str == "high":
+                                req_data["priority"] = Priority.HIGH
+                            elif priority_str == "low":
+                                req_data["priority"] = Priority.LOW
+                            else:
+                                req_data["priority"] = Priority.MEDIUM
+                        # If already an enum, keep it
+                    else:
+                        req_data["priority"] = Priority.MEDIUM
+                    
+                    requirement = Requirement(**req_data)
+                    requirements.append(requirement)
+                blackboard.requirements = requirements
+            
+            blackboard.current_step = "jd_analysis"
+            
+            self.logger.info(
+                "JD analysis restored from cache",
+                inferred_level=blackboard.role_profile.inferred_level if blackboard.role_profile else None,
+                requirement_count=len(blackboard.requirements)
+            )
+            
+            return blackboard
+        except Exception as e:
+            self.logger.warning("Failed to restore from cache, falling back to LLM", error=str(e))
+            return None  # Fall through to normal execution
+    
+    def extract_cache_result(self, blackboard: Blackboard) -> dict | None:
+        """Extract JD analysis result for caching."""
+        if blackboard.role_profile is None or not blackboard.requirements:
+            return None
+        
+        return {
+            "role_profile": blackboard.role_profile.model_dump(),
+            "requirements": [r.model_dump() for r in blackboard.requirements]
+        }
+    
     def get_system_prompt(self) -> str:
         """Return the system prompt for JD analysis."""
         return """You are an expert technical recruiter and resume strategist. Your task is to analyze a job description and produce a structured analysis that will guide resume optimization.
@@ -123,9 +183,10 @@ Respond with JSON:
         json_text = self._extract_json(response)
         
         try:
-            data = json.loads(json_text)
-        except json.JSONDecodeError as e:
-            raise ValidationError(f"Invalid JSON response from JD Analyst: {e}") from e
+            data = self._parse_json_with_repair(json_text, context="JD Analyst")
+        except ValidationError:
+            # Re-raise ValidationError as-is (already has good error message)
+            raise
         
         # Validate structure
         if "role_profile" not in data:
@@ -172,7 +233,7 @@ Respond with JSON:
         # Update blackboard
         blackboard.role_profile = role_profile
         blackboard.requirements = requirements
-        blackboard.current_step = "jd_analysis_complete"
+        blackboard.current_step = "jd_analysis"
         
         self.logger.info(
             "JD analysis complete",

@@ -31,6 +31,10 @@ PRICING = {
             "input": 0.075,  # $0.075 per 1M input tokens
             "output": 0.30,  # $0.30 per 1M output tokens
         },
+        "gemini-2.5-flash": {
+            "input": 0.075,  # $0.075 per 1M input tokens (same as 1.5 Flash)
+            "output": 0.30,  # $0.30 per 1M output tokens (same as 1.5 Flash)
+        },
     },
     "groq": {
         "llama-3.1-70b-versatile": {
@@ -74,19 +78,38 @@ def estimate_cost(
     # Try exact model match first
     model_pricing = provider_pricing.get(model)
     
-    # Fallback: find models with matching prefix
+    # Fallback: find models with matching prefix or similar version
     # Matches if: requested model starts with available model OR available model starts with requested prefix
+    # Also handles version differences (e.g., "gemini-2.5-flash" matches "gemini-1.5-flash")
     # Examples: "gpt-4o-turbo" matches "gpt-4o", "gpt-4" matches "gpt-4o"
     if not model_pricing:
         model_parts = model.split("-")
         if len(model_parts) >= 2:
             prefix = "-".join(model_parts[:2])  # First two parts (e.g., "gpt-4")
             # Find first model that matches:
-            # 1. Requested model starts with available model (e.g., "gpt-4o-turbo" starts with "gpt-4o")
-            # 2. Available model starts with requested prefix (e.g., "gpt-4o" starts with "gpt-4")
+            # Priority order:
+            # 1. For Gemini models: match by base name ignoring version (e.g., "gemini-2.5-flash" matches "gemini-1.5-flash")
+            # 2. Requested model starts with available model (e.g., "gpt-4o-turbo" starts with "gpt-4o")
+            # 3. Available model starts with requested prefix (e.g., "gpt-4o" starts with "gpt-4")
             for model_key in provider_pricing:
-                if model.startswith(model_key) or model_key.startswith(prefix):
+                matched = False
+                
+                # Special handling for Gemini models: match by base name (gemini-X.X-flash)
+                # Check this first as it's more precise than prefix matching
+                if provider_name == "google" and "gemini" in model.lower() and "gemini" in model_key.lower():
+                    # Extract base name (e.g., "gemini-flash" from "gemini-1.5-flash" or "gemini-2.5-flash")
+                    model_base = "-".join([p for p in model.split("-") if p not in ["1.5", "2.5", "1", "2"]])
+                    key_base = "-".join([p for p in model_key.split("-") if p not in ["1.5", "2.5", "1", "2"]])
+                    if model_base == key_base:
+                        model_pricing = provider_pricing[model_key]
+                        matched = True
+                
+                # General prefix matching (for non-Gemini models or if Gemini matching didn't succeed)
+                if not matched and (model.startswith(model_key) or model_key.startswith(prefix)):
                     model_pricing = provider_pricing[model_key]
+                    matched = True
+                
+                if matched:
                     break
     
     if not model_pricing:

@@ -15,6 +15,84 @@ if TYPE_CHECKING:
 class ResumeWriterAgent(BaseAgent):
     """Generates resume content from evidence cards with human tone."""
     
+    def get_cache_key_inputs(self, blackboard: Blackboard) -> tuple | None:
+        """Get cache key inputs: role profile, evidence map, selected evidence IDs, and template."""
+        if not blackboard.role_profile or not blackboard.selected_evidence_ids:
+            return None
+        
+        # Include role profile key fields
+        role_profile_key = (
+            blackboard.role_profile.inferred_level,
+            tuple(sorted(blackboard.role_profile.must_haves)),
+            tuple(sorted(blackboard.role_profile.nice_to_haves)),
+        )
+        
+        # Include selected evidence IDs (sorted)
+        selected_ids_key = tuple(sorted(blackboard.selected_evidence_ids))
+        
+        # Include evidence map (requirement IDs and evidence card IDs)
+        evidence_map_key = tuple(
+            (m.requirement_id, tuple(sorted(m.evidence_card_ids)))
+            for m in sorted(blackboard.evidence_map, key=lambda m: m.requirement_id)
+        ) if blackboard.evidence_map else ()
+        
+        # Include gap resolutions (gap IDs)
+        gap_resolutions_key = tuple(
+            g.gap_id for g in sorted(blackboard.gap_resolutions, key=lambda g: g.gap_id)
+        ) if blackboard.gap_resolutions else ()
+        
+        # Include template path (or hash of template content)
+        template_path = blackboard.inputs.template_path or ""
+        template_key = template_path
+        
+        return (role_profile_key, selected_ids_key, evidence_map_key, gap_resolutions_key, template_key)
+    
+    def restore_from_cache(self, blackboard: Blackboard, cached_result: dict) -> Blackboard | None:
+        """Restore blackboard from cached resume draft."""
+        try:
+            # Restore resume draft
+            if "resume_draft" in cached_result:
+                resume_draft_data = cached_result["resume_draft"]
+                resume_sections = [
+                    ResumeSection(**s) for s in resume_draft_data.get("sections", [])
+                ]
+                blackboard.resume_draft = ResumeDraft(sections=resume_sections)
+            
+            # Restore claim index
+            if "claim_index" in cached_result:
+                claim_mappings = [
+                    ClaimMapping(**c) for c in cached_result["claim_index"]
+                ]
+                blackboard.claim_index = claim_mappings
+            
+            # Restore change log
+            if "change_log" in cached_result:
+                blackboard.change_log = cached_result["change_log"]
+            
+            blackboard.current_step = "writing"
+            
+            self.logger.info(
+                "Resume writing restored from cache",
+                sections_count=len(blackboard.resume_draft.sections) if blackboard.resume_draft else 0,
+                claim_mappings_count=len(blackboard.claim_index)
+            )
+            
+            return blackboard
+        except Exception as e:
+            self.logger.warning("Failed to restore from cache, falling back to LLM", error=str(e))
+            return None
+    
+    def extract_cache_result(self, blackboard: Blackboard) -> dict | None:
+        """Extract resume writing result for caching."""
+        if not blackboard.resume_draft or not blackboard.claim_index:
+            return None
+        
+        return {
+            "resume_draft": blackboard.resume_draft.model_dump(),
+            "claim_index": [c.model_dump() for c in blackboard.claim_index],
+            "change_log": blackboard.change_log
+        }
+    
     def get_system_prompt(self) -> str:
         """Return the system prompt for resume writing."""
         return """You are an expert resume writer who creates compelling, human-sounding resumes. You write with clarity, confidence, and results-focus.
@@ -189,9 +267,10 @@ Respond with JSON:
         json_text = self._extract_json(response)
         
         try:
-            data = json.loads(json_text)
-        except json.JSONDecodeError as e:
-            raise ValidationError(f"Invalid JSON response from Resume Writer: {e}") from e
+            data = self._parse_json_with_repair(json_text, context="Resume Writer")
+        except ValidationError:
+            # Re-raise ValidationError as-is (already has good error message)
+            raise
         
         # Validate structure
         if "sections" not in data:
@@ -296,7 +375,7 @@ Respond with JSON:
         blackboard.resume_draft = resume_draft
         blackboard.claim_index = claim_mappings
         blackboard.change_log = change_log if isinstance(change_log, list) else []
-        blackboard.current_step = "writing_complete"
+        blackboard.current_step = "writing"
         
         self.logger.info(
             "Resume writing complete",
